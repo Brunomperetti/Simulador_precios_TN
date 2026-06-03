@@ -303,7 +303,7 @@ def main() -> None:
     df_editado = st.data_editor(
         st.session_state["tabla_trabajo"],
         key="editor_productos",
-        width="stretch",
+        use_container_width=True,
         num_rows="fixed",
         disabled=["Nombre", "Marca", "SKU", "Precio", "Nuevo Precio"],
         column_config={
@@ -324,7 +324,7 @@ def main() -> None:
 
     st.write(f"Productos cargados: **{len(df_calculado)}**")
     st.subheader("Resultado calculado")
-    st.dataframe(df_calculado, width="stretch")
+    st.dataframe(df_calculado, use_container_width=True)
 
     # El dataframe final conserva todas las columnas originales y solo reemplaza la columna Precio.
     df_final = df.copy()
