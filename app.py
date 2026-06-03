@@ -7,6 +7,19 @@ import streamlit as st
 
 # Columnas mínimas que necesita el simulador para trabajar con el CSV de Tienda Nube.
 COLUMNAS_REQUERIDAS = ["Nombre", "Marca", "SKU", "Precio", "Costo"]
+COLUMNAS_ULTIMO_PRODUCTO = [
+    "Nombre",
+    "Marca",
+    "SKU",
+    "Precio",
+    "Costo",
+    "Multiplicador",
+    "Nuevo Precio",
+]
+COLUMNAS_PRODUCTOS_MODIFICADOS = COLUMNAS_ULTIMO_PRODUCTO + [
+    "Diferencia $",
+    "Diferencia %",
+]
 
 
 def detectar_separador(contenido: bytes) -> str:
@@ -125,25 +138,87 @@ def formatear_opcion_producto(fila: pd.Series) -> str:
 
 
 def filtrar_productos(df_trabajo: pd.DataFrame, busqueda: str) -> pd.DataFrame:
-    """Filtra productos por texto contenido en Nombre o SKU."""
+    """Filtra productos por texto contenido en Nombre, SKU o Marca."""
     texto = busqueda.strip().lower()
     if not texto:
         return df_trabajo
 
-    nombre_contiene = (
-        df_trabajo["Nombre"]
-        .astype(str)
-        .str.lower()
-        .str.contains(texto, na=False, regex=False)
-    )
-    sku_contiene = (
-        df_trabajo["SKU"]
-        .astype(str)
-        .str.lower()
-        .str.contains(texto, na=False, regex=False)
+    mascara = pd.Series(False, index=df_trabajo.index)
+    for columna in ("Nombre", "SKU", "Marca"):
+        mascara |= (
+            df_trabajo[columna]
+            .astype(str)
+            .str.lower()
+            .str.contains(texto, na=False, regex=False)
+        )
+
+    return df_trabajo[mascara]
+
+
+def calcular_mascara_modificados(df_calculado: pd.DataFrame) -> pd.Series:
+    """Identifica filas con multiplicador aplicado o precio final diferente al actual."""
+    multiplicador_modificado = df_calculado["Multiplicador"].fillna(1).ne(1)
+    precio_actual = df_calculado["Precio"]
+    nuevo_precio = df_calculado["Nuevo Precio"]
+    precio_diferente = precio_actual.ne(nuevo_precio) | precio_actual.isna().ne(
+        nuevo_precio.isna()
     )
 
-    return df_trabajo[nombre_contiene | sku_contiene]
+    return multiplicador_modificado | precio_diferente
+
+
+def preparar_vista_cambios(df_calculado: pd.DataFrame) -> pd.DataFrame:
+    """Agrega diferencias para revisar rápidamente los productos modificados."""
+    df_cambios = df_calculado.copy()
+    df_cambios["Diferencia $"] = df_cambios["Nuevo Precio"] - df_cambios["Precio"]
+    df_cambios["Diferencia %"] = (
+        df_cambios["Diferencia $"] / df_cambios["Precio"].replace(0, pd.NA)
+    ) * 100
+
+    return df_cambios.loc[
+        calcular_mascara_modificados(df_cambios), COLUMNAS_PRODUCTOS_MODIFICADOS
+    ]
+
+
+def mostrar_resumen_cambios(df_calculado: pd.DataFrame) -> None:
+    """Muestra métricas principales para no revisar producto por producto."""
+    productos_modificados = int(calcular_mascara_modificados(df_calculado).sum())
+    productos_sin_costo = int(df_calculado["Costo"].isna().sum())
+    multiplicadores_distintos = int(df_calculado["Multiplicador"].fillna(1).ne(1).sum())
+    productos_sin_nuevo_precio = int(df_calculado["Nuevo Precio"].isna().sum())
+
+    st.subheader("Resumen de cambios")
+    col_total, col_modificados, col_sin_costo, col_multiplicador, col_sin_precio = (
+        st.columns(5)
+    )
+    col_total.metric("Total de productos", len(df_calculado))
+    col_modificados.metric("Productos modificados", productos_modificados)
+    col_sin_costo.metric("Productos sin costo", productos_sin_costo)
+    col_multiplicador.metric("Multiplicador ≠ 1", multiplicadores_distintos)
+    col_sin_precio.metric("Nuevo precio vacío", productos_sin_nuevo_precio)
+
+
+def mostrar_advertencias_exportacion(df_calculado: pd.DataFrame) -> None:
+    """Advierte problemas que conviene resolver antes de descargar el CSV final."""
+    productos_sin_costo = int(df_calculado["Costo"].isna().sum())
+    productos_sin_nuevo_precio = int(df_calculado["Nuevo Precio"].isna().sum())
+    precio_menor_costo = df_calculado["Nuevo Precio"].lt(df_calculado["Costo"])
+    productos_precio_menor_costo = int(precio_menor_costo.sum())
+
+    advertencias = []
+    if productos_sin_costo:
+        advertencias.append(f"{productos_sin_costo} productos sin costo")
+    if productos_sin_nuevo_precio:
+        advertencias.append(f"{productos_sin_nuevo_precio} productos sin nuevo precio")
+    if productos_precio_menor_costo:
+        advertencias.append(
+            f"{productos_precio_menor_costo} productos con nuevo precio menor al costo"
+        )
+
+    if advertencias:
+        st.warning("Antes de exportar, revisá: " + "; ".join(advertencias) + ".")
+    else:
+        st.success("Control de exportación OK: no se detectaron problemas.")
 
 
 def formato_precio(valor) -> str:
@@ -214,6 +289,7 @@ def main() -> None:
     ):
         st.session_state["tabla_trabajo"] = preparar_tabla_trabajo(df)
         st.session_state["archivo_id"] = archivo_id
+        st.session_state["ultimo_producto_modificado"] = None
 
     st.subheader("Multiplicador masivo por marca")
     marcas = sorted(
@@ -246,10 +322,10 @@ def main() -> None:
 
     st.subheader("Multiplicador por producto")
     st.write(
-        "Buscá por **Nombre** o **SKU** y aplicá el cambio solo al producto elegido."
+        "Buscá por **Nombre**, **SKU** o **Marca** y aplicá el cambio solo al producto elegido."
     )
 
-    busqueda_producto = st.text_input("Buscar producto por Nombre o SKU")
+    busqueda_producto = st.text_input("Buscar producto por Nombre, SKU o Marca")
     productos_filtrados = filtrar_productos(
         st.session_state["tabla_trabajo"], busqueda_producto
     )
@@ -288,11 +364,32 @@ def main() -> None:
         )
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
+        st.session_state["ultimo_producto_modificado"] = tabla_actual.loc[
+            [producto_seleccionado], COLUMNAS_ULTIMO_PRODUCTO
+        ]
         producto_aplicado = formatear_opcion_producto(
             tabla_actual.loc[producto_seleccionado]
         )
         st.success(
             f"Multiplicador {multiplicador_producto} aplicado al producto: {producto_aplicado}."
+        )
+
+    if st.session_state.get("ultimo_producto_modificado") is not None:
+        st.subheader("Último producto modificado")
+        st.dataframe(
+            st.session_state["ultimo_producto_modificado"],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Precio": st.column_config.NumberColumn("Precio actual", format="%.2f"),
+                "Costo": st.column_config.NumberColumn("Costo", format="%.2f"),
+                "Multiplicador": st.column_config.NumberColumn(
+                    "Multiplicador", format="%.4f"
+                ),
+                "Nuevo Precio": st.column_config.NumberColumn(
+                    "Nuevo Precio", format="%.2f"
+                ),
+            },
         )
 
     st.subheader("Editor de productos")
@@ -322,15 +419,68 @@ def main() -> None:
     df_calculado = recalcular_precios(df_editado)
     st.session_state["tabla_trabajo"] = df_calculado
 
-    st.write(f"Productos cargados: **{len(df_calculado)}**")
+    mostrar_resumen_cambios(df_calculado)
+
+    st.subheader("Productos modificados")
+    productos_modificados = preparar_vista_cambios(df_calculado)
+    if productos_modificados.empty:
+        st.info("Todavía no hay productos modificados.")
+    else:
+        st.dataframe(
+            productos_modificados,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Precio": st.column_config.NumberColumn("Precio actual", format="%.2f"),
+                "Costo": st.column_config.NumberColumn("Costo", format="%.2f"),
+                "Multiplicador": st.column_config.NumberColumn(
+                    "Multiplicador", format="%.4f"
+                ),
+                "Nuevo Precio": st.column_config.NumberColumn(
+                    "Nuevo Precio", format="%.2f"
+                ),
+                "Diferencia $": st.column_config.NumberColumn(
+                    "Diferencia $", format="%.2f"
+                ),
+                "Diferencia %": st.column_config.NumberColumn(
+                    "Diferencia %", format="%.2f%%"
+                ),
+            },
+        )
+
+    st.subheader("Buscar producto en la simulación")
+    busqueda_simulacion = st.text_input(
+        "Buscar en la simulación por Nombre, SKU o Marca",
+        key="busqueda_simulacion",
+    )
+    productos_encontrados = filtrar_productos(df_calculado, busqueda_simulacion)
+    st.caption(f"Coincidencias: {len(productos_encontrados)}")
+    st.dataframe(
+        productos_encontrados,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Precio": st.column_config.NumberColumn("Precio actual", format="%.2f"),
+            "Costo": st.column_config.NumberColumn("Costo", format="%.2f"),
+            "Multiplicador": st.column_config.NumberColumn(
+                "Multiplicador", format="%.4f"
+            ),
+            "Nuevo Precio": st.column_config.NumberColumn(
+                "Nuevo Precio", format="%.2f"
+            ),
+        },
+    )
+
     st.subheader("Resultado calculado")
     st.dataframe(df_calculado, use_container_width=True)
 
-    # El dataframe final conserva todas las columnas originales y solo reemplaza la columna Precio.
+    # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
     df_final = df.copy()
     df_final["Precio"] = df_calculado["Nuevo Precio"].map(formato_precio)
+    df_final["Costo"] = df_calculado["Costo"].map(formato_precio)
 
     st.subheader("Exportar CSV final")
+    mostrar_advertencias_exportacion(df_calculado)
     st.download_button(
         label="Descargar CSV para Tienda Nube",
         data=generar_csv_descarga(df_final, separador),
