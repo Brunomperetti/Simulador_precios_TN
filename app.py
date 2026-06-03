@@ -115,6 +115,37 @@ def recalcular_precios(df_editado: pd.DataFrame) -> pd.DataFrame:
     return df_calculado
 
 
+def formatear_opcion_producto(fila: pd.Series) -> str:
+    """Muestra cada producto como Nombre | SKU | Marca para el selector."""
+    nombre = str(fila.get("Nombre", "")).strip()
+    sku = str(fila.get("SKU", "")).strip()
+    marca = str(fila.get("Marca", "")).strip()
+
+    return f"{nombre} | {sku} | {marca}"
+
+
+def filtrar_productos(df_trabajo: pd.DataFrame, busqueda: str) -> pd.DataFrame:
+    """Filtra productos por texto contenido en Nombre o SKU."""
+    texto = busqueda.strip().lower()
+    if not texto:
+        return df_trabajo
+
+    nombre_contiene = (
+        df_trabajo["Nombre"]
+        .astype(str)
+        .str.lower()
+        .str.contains(texto, na=False, regex=False)
+    )
+    sku_contiene = (
+        df_trabajo["SKU"]
+        .astype(str)
+        .str.lower()
+        .str.contains(texto, na=False, regex=False)
+    )
+
+    return df_trabajo[nombre_contiene | sku_contiene]
+
+
 def formato_precio(valor) -> str:
     """Formatea el precio para el CSV final evitando valores 'nan'."""
     if pd.isna(valor):
@@ -176,6 +207,14 @@ def main() -> None:
         )
         st.stop()
 
+    # Guardamos una tabla de trabajo por archivo para conservar cambios entre interacciones.
+    if (
+        "tabla_trabajo" not in st.session_state
+        or st.session_state.get("archivo_id") != archivo_id
+    ):
+        st.session_state["tabla_trabajo"] = preparar_tabla_trabajo(df)
+        st.session_state["archivo_id"] = archivo_id
+
     st.subheader("Multiplicador masivo por marca")
     marcas = sorted(
         marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
@@ -195,13 +234,6 @@ def main() -> None:
         )
         aplicar_masivo = st.form_submit_button("Aplicar a la marca")
 
-    if (
-        "tabla_trabajo" not in st.session_state
-        or st.session_state.get("archivo_id") != archivo_id
-    ):
-        st.session_state["tabla_trabajo"] = preparar_tabla_trabajo(df)
-        st.session_state["archivo_id"] = archivo_id
-
     if aplicar_masivo and marcas:
         tabla_actual = st.session_state["tabla_trabajo"].copy()
         mascara_marca = tabla_actual["Marca"].astype(str) == str(marca_seleccionada)
@@ -212,6 +244,57 @@ def main() -> None:
             f"Multiplicador {multiplicador_masivo} aplicado a {int(mascara_marca.sum())} productos."
         )
 
+    st.subheader("Multiplicador por producto")
+    st.write(
+        "Buscá por **Nombre** o **SKU** y aplicá el cambio solo al producto elegido."
+    )
+
+    busqueda_producto = st.text_input("Buscar producto por Nombre o SKU")
+    productos_filtrados = filtrar_productos(
+        st.session_state["tabla_trabajo"], busqueda_producto
+    )
+    opciones_productos = list(productos_filtrados.index)
+    etiquetas_productos = {
+        indice: formatear_opcion_producto(fila)
+        for indice, fila in productos_filtrados.iterrows()
+    }
+
+    with st.form("multiplicador_producto"):
+        col_producto, col_multiplicador_producto = st.columns([3, 1])
+        producto_seleccionado = col_producto.selectbox(
+            "Producto",
+            options=opciones_productos,
+            format_func=lambda indice: etiquetas_productos.get(indice, ""),
+            disabled=not opciones_productos,
+        )
+        multiplicador_producto = col_multiplicador_producto.number_input(
+            "Multiplicador del producto",
+            min_value=0.0,
+            value=1.0,
+            step=0.1,
+            format="%.4f",
+        )
+        aplicar_producto = st.form_submit_button(
+            "Aplicar al producto", disabled=not opciones_productos
+        )
+
+    if not opciones_productos:
+        st.info("No se encontraron productos para la búsqueda ingresada.")
+
+    if aplicar_producto and opciones_productos:
+        tabla_actual = st.session_state["tabla_trabajo"].copy()
+        tabla_actual.loc[producto_seleccionado, "Multiplicador"] = (
+            multiplicador_producto
+        )
+        tabla_actual = recalcular_precios(tabla_actual)
+        st.session_state["tabla_trabajo"] = tabla_actual
+        producto_aplicado = formatear_opcion_producto(
+            tabla_actual.loc[producto_seleccionado]
+        )
+        st.success(
+            f"Multiplicador {multiplicador_producto} aplicado al producto: {producto_aplicado}."
+        )
+
     st.subheader("Editor de productos")
     st.write(
         "Podés editar **Costo** y **Multiplicador** por fila. Las demás columnas son solo de referencia."
@@ -220,7 +303,7 @@ def main() -> None:
     df_editado = st.data_editor(
         st.session_state["tabla_trabajo"],
         key="editor_productos",
-        use_container_width=True,
+        width="stretch",
         num_rows="fixed",
         disabled=["Nombre", "Marca", "SKU", "Precio", "Nuevo Precio"],
         column_config={
@@ -241,7 +324,7 @@ def main() -> None:
 
     st.write(f"Productos cargados: **{len(df_calculado)}**")
     st.subheader("Resultado calculado")
-    st.dataframe(df_calculado, use_container_width=True)
+    st.dataframe(df_calculado, width="stretch")
 
     # El dataframe final conserva todas las columnas originales y solo reemplaza la columna Precio.
     df_final = df.copy()
