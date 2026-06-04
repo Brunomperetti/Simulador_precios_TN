@@ -1,3 +1,4 @@
+import csv
 import unittest
 from io import StringIO
 
@@ -5,6 +6,7 @@ import pandas as pd
 
 from app import (
     construir_dataframe_exportacion,
+    detectar_codificacion,
     generar_csv_descarga,
     obtener_metricas_csv,
     preparar_tabla_trabajo,
@@ -159,6 +161,62 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(df_releido.loc[1, "Precio"], "17,525.28")
         self.assertEqual(df_releido.loc[1, "Costo"], "8,762.64")
         self.assertEqual(df_releido.loc[2, "Costo"], "9,000.00")
+
+    def test_csv_exportado_imita_formato_tienda_nube_sin_bom_y_con_quote_minimal(self):
+        columnas = [
+            "Identificador de URL",
+            "Nombre",
+            "Marca",
+            "SKU",
+            "Precio",
+            "Costo",
+        ] + [f"Columna {numero}" for numero in range(7, 31)]
+        filas = [
+            [
+                "producto-a",
+                "Producto A; edición especial",
+                "Marca Ñ",
+                "SKU-A",
+                "16,850.00",
+                "8,762.64",
+            ],
+            ["producto-b", "Producto B", "Marca 2", "SKU-B", "10,000.00", "5,000.00"],
+        ]
+        df_original = pd.DataFrame(
+            [
+                fila + [f"valor-{indice}-{columna}" for columna in range(7, 31)]
+                for indice, fila in enumerate(filas)
+            ],
+            columns=columnas,
+        )
+        csv_original = df_original.to_csv(
+            index=False,
+            sep=";",
+            quoting=csv.QUOTE_MINIMAL,
+            lineterminator="\n",
+        ).encode("latin1")
+        codificacion = detectar_codificacion(csv_original)
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[1, "Multiplicador"] = 2.5
+
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales
+        )
+        csv_exportado = generar_csv_descarga(df_exportado, ";", codificacion)
+        texto_exportado = csv_exportado.decode("latin1")
+        filas_exportadas = list(csv.reader(StringIO(texto_exportado), delimiter=";"))
+
+        self.assertFalse(csv_exportado.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(codificacion, "latin1")
+        self.assertEqual(texto_exportado.splitlines()[0].count(";"), len(columnas) - 1)
+        self.assertEqual(len(filas_exportadas), len(filas) + 1)
+        self.assertTrue(all(len(fila) == len(columnas) for fila in filas_exportadas))
+        self.assertEqual(filas_exportadas[0], columnas)
+        self.assertIn('"Producto A; edición especial"', texto_exportado)
+        self.assertEqual(filas_exportadas[2][columnas.index("Precio")], "12,500.00")
+        self.assertEqual(filas_exportadas[1][columnas.index("Precio")], "16,850.00")
 
     def test_metricas_csv_cuenta_productos_unicos_y_variantes(self):
         filas, productos_unicos, variantes = obtener_metricas_csv(

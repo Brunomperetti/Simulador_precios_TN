@@ -41,11 +41,45 @@ def detectar_separador(contenido: bytes) -> str:
         return ","
 
 
-def leer_csv(contenido: bytes, separador: str) -> pd.DataFrame:
+def detectar_codificacion(contenido: bytes) -> str:
+    """Detecta una codificación compatible para leer y reexportar el CSV sin BOM."""
+    if contenido.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+
+    for encoding in ("utf-8", "latin1"):
+        try:
+            contenido.decode(encoding)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+
+    return "utf-8"
+
+
+def normalizar_codificacion_exportacion(encoding: str | None) -> str:
+    """Evita escribir BOM aunque el CSV original se haya leído con utf-8-sig."""
+    if not encoding:
+        return "utf-8"
+
+    if encoding.lower().replace("_", "-") == "utf-8-sig":
+        return "utf-8"
+
+    return encoding
+
+
+def leer_csv(
+    contenido: bytes, separador: str, encoding: str | None = None
+) -> pd.DataFrame:
     """Lee el CSV probando codificaciones habituales de exportaciones de tiendas."""
     ultimo_error = None
+    codificaciones = [encoding] if encoding else []
+    codificaciones.extend(
+        candidato
+        for candidato in ("utf-8-sig", "utf-8", "latin1")
+        if candidato not in codificaciones
+    )
 
-    for encoding in ("utf-8-sig", "utf-8", "latin1"):
+    for encoding in codificaciones:
         try:
             return pd.read_csv(
                 StringIO(contenido.decode(encoding)),
@@ -401,11 +435,19 @@ def obtener_metricas_csv(df: pd.DataFrame) -> tuple[int, int | None, int | None]
     return filas_csv, productos_unicos, variantes_repetidas
 
 
-def generar_csv_descarga(df_final: pd.DataFrame, separador: str) -> bytes:
-    """Exporta con utf-8-sig para que Excel y Tienda Nube lean bien acentos y ñ."""
-    return df_final.to_csv(index=False, sep=separador, encoding="utf-8-sig").encode(
-        "utf-8-sig"
+def generar_csv_descarga(
+    df_final: pd.DataFrame, separador: str, encoding: str | None = "utf-8"
+) -> bytes:
+    """Exporta con separador original, QUOTE_MINIMAL y sin BOM."""
+    encoding_exportacion = normalizar_codificacion_exportacion(encoding)
+    csv_texto = df_final.to_csv(
+        index=False,
+        sep=separador,
+        quoting=csv.QUOTE_MINIMAL,
+        lineterminator="\n",
     )
+
+    return csv_texto.encode(encoding_exportacion)
 
 
 def obtener_config_columnas() -> dict:
@@ -468,9 +510,10 @@ def main() -> None:
     contenido = archivo.getvalue()
     archivo_id = hashlib.sha256(contenido).hexdigest()
     separador = detectar_separador(contenido)
+    codificacion = detectar_codificacion(contenido)
 
     try:
-        df = leer_csv(contenido, separador)
+        df = leer_csv(contenido, separador, codificacion)
     except Exception as error:
         st.error(
             f"No se pudo leer el CSV. Revisá el archivo e intentá nuevamente. Detalle: {error}"
@@ -495,6 +538,10 @@ def main() -> None:
     )
     st.write(f"Columnas: **{df.shape[1]}**")
     st.write(f"Separador detectado: **{repr(separador)}**")
+    st.write(
+        "Codificación detectada para exportar sin BOM: "
+        f"**{normalizar_codificacion_exportacion(codificacion)}**"
+    )
 
     columnas_faltantes = [
         columna for columna in COLUMNAS_REQUERIDAS if columna not in df.columns
@@ -776,7 +823,7 @@ def main() -> None:
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
     st.download_button(
         label="Descargar CSV para Tienda Nube",
-        data=generar_csv_descarga(df_final, separador),
+        data=generar_csv_descarga(df_final, separador, codificacion),
         file_name="tienda_nube_precios_actualizados.csv",
         mime="text/csv",
     )
