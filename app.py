@@ -355,17 +355,23 @@ def construir_dataframe_exportacion(
     df_original: pd.DataFrame,
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
+    indices_afectados: set | None = None,
 ) -> pd.DataFrame:
-    """Conserva estructura original y actualiza solo Precio/Costo bajo reglas de exportación."""
+    """Conserva estructura original y exporta solo cambios explícitos de Precio/Costo."""
     df_final = df_original.copy()
+    if indices_afectados is None:
+        indices_afectados = set()
 
+    mascara_modificados = calcular_mascara_modificados(
+        df_calculado, costos_originales, indices_afectados
+    )
     nuevos_precios = pd.to_numeric(
         df_calculado["Nuevo Precio"].map(normalizar_numero), errors="coerce"
     )
     precios_exportados = df_original["Precio"].copy()
-    mascara_nuevo_precio_valido = nuevos_precios.notna()
-    precios_exportados.loc[mascara_nuevo_precio_valido] = nuevos_precios.loc[
-        mascara_nuevo_precio_valido
+    mascara_actualizar_precio = mascara_modificados & nuevos_precios.notna()
+    precios_exportados.loc[mascara_actualizar_precio] = nuevos_precios.loc[
+        mascara_actualizar_precio
     ].map(formatear_numero_tienda_nube)
     df_final["Precio"] = precios_exportados
 
@@ -762,7 +768,9 @@ def main() -> None:
     mostrar_tabla_revision(resultado_calculado, config_columnas)
 
     # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
-    df_final = construir_dataframe_exportacion(df, df_calculado, costos_originales)
+    df_final = construir_dataframe_exportacion(
+        df, df_calculado, costos_originales, indices_afectados
+    )
 
     st.subheader("Exportar CSV final")
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)

@@ -40,6 +40,14 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
                 "10,000.00",
                 "8,762.64",
             ],
+            [
+                "producto-c",
+                "Producto C",
+                "Marca 3",
+                "SKU-C",
+                "20,000.00",
+                "5,000.00",
+            ],
         ]
         return pd.DataFrame(
             [
@@ -48,6 +56,69 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             ],
             columns=columnas,
         )
+
+    def test_producto_con_multiplicador_uno_no_afectado_conserva_precio_original(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales
+        )
+
+        self.assertEqual(df_exportado.loc[1, "Precio"], df_original.loc[1, "Precio"])
+        self.assertEqual(df_exportado.loc[2, "Precio"], df_original.loc[2, "Precio"])
+        self.assertEqual(df_exportado.loc[3, "Precio"], df_original.loc[3, "Precio"])
+
+    def test_producto_con_multiplicador_distinto_exporta_costo_por_multiplicador(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[1, "Multiplicador"] = 2.5
+
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales
+        )
+
+        self.assertEqual(df_exportado.loc[1, "Precio"], "21,906.60")
+        self.assertEqual(df_exportado.loc[2, "Precio"], df_original.loc[2, "Precio"])
+
+    def test_producto_sin_costo_afectado_conserva_precio_original(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[0, "Multiplicador"] = 2.5
+
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales, {0}
+        )
+
+        self.assertEqual(df_exportado.loc[0, "Precio"], df_original.loc[0, "Precio"])
+
+    def test_csv_exportado_no_modifica_precios_no_tocados(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[1, "Multiplicador"] = 2.5
+
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales
+        )
+        csv_exportado = generar_csv_descarga(df_exportado, ";")
+        df_releido = pd.read_csv(
+            StringIO(csv_exportado.decode("utf-8-sig")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+
+        self.assertEqual(df_releido.loc[1, "Precio"], "21,906.60")
+        self.assertEqual(df_releido.loc[2, "Precio"], df_original.loc[2, "Precio"])
+        self.assertEqual(df_releido.loc[3, "Precio"], df_original.loc[3, "Precio"])
 
     def test_producto_sin_costo_conserva_precio_original_al_exportar(self):
         df_original = self.crear_csv_original()
@@ -94,8 +165,8 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             self.crear_csv_original()
         )
 
-        self.assertEqual(filas, 3)
-        self.assertEqual(productos_unicos, 2)
+        self.assertEqual(filas, 4)
+        self.assertEqual(productos_unicos, 3)
         self.assertEqual(variantes, 1)
 
 
