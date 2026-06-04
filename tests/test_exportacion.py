@@ -5,10 +5,14 @@ from io import StringIO
 import pandas as pd
 
 from app import (
+    calcular_mascara_precios_actualizados,
+    calcular_resumen_aplicacion,
     construir_dataframe_exportacion,
+    construir_mensaje_aplicacion,
     detectar_codificacion,
     generar_csv_descarga,
     obtener_metricas_csv,
+    obtener_productos_con_variantes,
     preparar_tabla_trabajo,
     recalcular_precios,
 )
@@ -281,6 +285,156 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(filas, 4)
         self.assertEqual(productos_unicos, 3)
         self.assertEqual(variantes, 1)
+
+    def test_identifica_variantes_por_identificador_url_repetido(self):
+        columnas = [
+            "Identificador de URL",
+            "Nombre",
+            "Marca",
+            "SKU",
+            "Nombre de propiedad 1",
+            "Valor de propiedad 1",
+            "Nombre de propiedad 2",
+            "Valor de propiedad 2",
+            "Nombre de propiedad 3",
+            "Valor de propiedad 3",
+            "Precio",
+            "Costo",
+        ]
+        df_original = pd.DataFrame(
+            [
+                [
+                    "producto-a",
+                    "Producto A",
+                    "Marca 1",
+                    "SKU-A",
+                    "Talle",
+                    "S",
+                    "Color",
+                    "Rojo",
+                    "",
+                    "",
+                    "100.00",
+                    "50.00",
+                ],
+                [
+                    "producto-a",
+                    "Producto A",
+                    "Marca 1",
+                    "SKU-A-M",
+                    "Talle",
+                    "M",
+                    "Color",
+                    "Rojo",
+                    "",
+                    "",
+                    "100.00",
+                    "50.00",
+                ],
+                [
+                    "producto-b",
+                    "Producto B",
+                    "Marca 2",
+                    "SKU-B",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "200.00",
+                    "100.00",
+                ],
+            ],
+            columns=columnas,
+        )
+
+        variantes = obtener_productos_con_variantes(df_original)
+
+        self.assertEqual(list(variantes.columns), columnas)
+        self.assertEqual(variantes.shape, (2, 12))
+        self.assertEqual(
+            variantes["Identificador de URL"].tolist(), ["producto-a", "producto-a"]
+        )
+        self.assertEqual(variantes["SKU"].tolist(), ["SKU-A", "SKU-A-M"])
+
+    def test_mensaje_marca_informa_afectados_actualizados_y_sin_costo(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        indices_marca = df_trabajo.index[df_trabajo["Marca"].eq("Marca 1")].tolist()
+        df_trabajo.loc[indices_marca, "Multiplicador"] = 3.1
+        df_calculado = recalcular_precios(df_trabajo)
+
+        mensaje = construir_mensaje_aplicacion(
+            "Multiplicador 3.1", df_calculado, indices_marca, "de la marca"
+        )
+        resumen = calcular_resumen_aplicacion(df_calculado, indices_marca)
+
+        self.assertEqual(
+            mensaje,
+            "Multiplicador 3.1 aplicado a 1 productos de la marca. "
+            "0 precios fueron actualizados. "
+            "1 productos quedaron sin modificar por no tener costo válido.",
+        )
+        self.assertEqual(
+            resumen,
+            {"afectados": 1, "precios_actualizados": 0, "sin_costo_valido": 1},
+        )
+
+    def test_producto_sin_costo_afectado_no_figura_como_precio_actualizado(self):
+        df_original = self.crear_csv_original()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        df_trabajo.loc[0, "Multiplicador"] = 3.1
+        df_calculado = recalcular_precios(df_trabajo)
+
+        precios_actualizados = calcular_mascara_precios_actualizados(df_calculado, {0})
+        resumen = calcular_resumen_aplicacion(df_calculado, {0})
+
+        self.assertFalse(bool(precios_actualizados.loc[0]))
+        self.assertEqual(resumen["precios_actualizados"], 0)
+        self.assertEqual(resumen["sin_costo_valido"], 1)
+
+    def test_csv_exportado_mantiene_394_filas_y_30_columnas(self):
+        columnas = [
+            "Identificador de URL",
+            "Nombre",
+            "Marca",
+            "SKU",
+            "Precio",
+            "Costo",
+        ] + [f"Columna {numero}" for numero in range(7, 31)]
+        filas = []
+        for indice in range(394):
+            filas.append(
+                [
+                    f"producto-{indice}",
+                    f"Producto {indice}",
+                    "Marca 1" if indice % 2 == 0 else "Marca 2",
+                    f"SKU-{indice}",
+                    "100.00",
+                    "50.00",
+                ]
+                + [f"valor-{indice}-{columna}" for columna in range(7, 31)]
+            )
+        df_original = pd.DataFrame(filas, columns=columnas)
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[0, "Multiplicador"] = 2.4
+        df_calculado = recalcular_precios(df_trabajo)
+
+        df_exportado = construir_dataframe_exportacion(
+            df_original, df_calculado, costos_originales
+        )
+        csv_exportado = generar_csv_descarga(df_exportado, ";")
+        df_releido = pd.read_csv(
+            StringIO(csv_exportado.decode("utf-8")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+
+        self.assertEqual(df_releido.shape, (394, 30))
+        self.assertEqual(list(df_releido.columns), columnas)
 
 
 if __name__ == "__main__":
