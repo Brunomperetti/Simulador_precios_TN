@@ -1,6 +1,7 @@
 import csv
 import hashlib
 from io import StringIO
+from numbers import Real
 
 import pandas as pd
 import streamlit as st
@@ -95,17 +96,21 @@ def leer_csv(
 
 def normalizar_numero(valor) -> float:
     """
-    Convierte números escritos con comas o puntos a float.
+    Convierte números escritos con comas o puntos a float real.
 
     Ejemplos válidos:
     - "1234.56"
     - "1234,56"
     - "1.234,56"
     - "1,234.56"
+    - valores numéricos ya calculados, que se preservan como float.
     - valores vacíos, que se convierten en NA.
     """
     if pd.isna(valor):
         return pd.NA
+
+    if isinstance(valor, Real) and not isinstance(valor, bool):
+        return float(valor)
 
     texto = str(valor).strip()
     if texto == "":
@@ -378,11 +383,11 @@ def mostrar_advertencias_exportacion(
 
 
 def formatear_numero_tienda_nube(valor) -> str:
-    """Formatea números con coma de miles, punto decimal y 2 decimales."""
+    """Formatea números para exportación con punto decimal y sin separador de miles."""
     if pd.isna(valor):
         return ""
 
-    return f"{float(valor):,.2f}"
+    return f"{float(valor):.2f}"
 
 
 def construir_dataframe_exportacion(
@@ -399,9 +404,7 @@ def construir_dataframe_exportacion(
     mascara_modificados = calcular_mascara_modificados(
         df_calculado, costos_originales, indices_afectados
     )
-    nuevos_precios = pd.to_numeric(
-        df_calculado["Nuevo Precio"].map(normalizar_numero), errors="coerce"
-    )
+    nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
     precios_exportados = df_original["Precio"].copy()
     mascara_actualizar_precio = mascara_modificados & nuevos_precios.notna()
     precios_exportados.loc[mascara_actualizar_precio] = nuevos_precios.loc[
@@ -413,9 +416,7 @@ def construir_dataframe_exportacion(
     costos_editados = series_diferentes(
         df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
     )
-    costos_con_valor = pd.to_numeric(
-        df_calculado["Costo"].map(normalizar_numero), errors="coerce"
-    )
+    costos_con_valor = pd.to_numeric(df_calculado["Costo"], errors="coerce")
     costos_exportados.loc[costos_editados] = costos_con_valor.loc[costos_editados].map(
         formatear_numero_tienda_nube
     )
