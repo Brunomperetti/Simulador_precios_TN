@@ -9,6 +9,20 @@ import streamlit as st
 # Columnas mínimas que necesita el simulador para trabajar con el CSV de Tienda Nube.
 COLUMNAS_REQUERIDAS = ["Nombre", "Marca", "SKU", "Precio", "Costo"]
 COLUMNA_IDENTIFICADOR_URL = "Identificador de URL"
+COLUMNAS_VARIANTES = [
+    "Identificador de URL",
+    "Nombre",
+    "Marca",
+    "SKU",
+    "Nombre de propiedad 1",
+    "Valor de propiedad 1",
+    "Nombre de propiedad 2",
+    "Valor de propiedad 2",
+    "Nombre de propiedad 3",
+    "Valor de propiedad 3",
+    "Precio",
+    "Costo",
+]
 COLUMNAS_BASE_VISTA = [
     "Nombre",
     "Marca",
@@ -225,21 +239,77 @@ def filtrar_productos(df_trabajo: pd.DataFrame, busqueda: str) -> pd.DataFrame:
     return df_trabajo[mascara]
 
 
+def calcular_mascara_precios_actualizados(
+    df_calculado: pd.DataFrame, indices_afectados: set | None = None
+) -> pd.Series:
+    """Marca filas cuyo precio final existe y cambia respecto del precio original."""
+    precio_actual = pd.to_numeric(df_calculado["Precio"], errors="coerce")
+    nuevo_precio = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
+    precio_cambia = series_diferentes(nuevo_precio, precio_actual)
+    precio_actualizable = nuevo_precio.notna() & precio_cambia
+
+    if indices_afectados is None:
+        return precio_actualizable
+
+    afectado_por_accion = pd.Series(
+        df_calculado.index.isin(indices_afectados), index=df_calculado.index
+    )
+    return precio_actualizable & afectado_por_accion
+
+
+def calcular_resumen_aplicacion(
+    df_calculado: pd.DataFrame, indices_afectados
+) -> dict[str, int]:
+    """Cuenta alcance, precios realmente actualizados y productos sin costo válido."""
+    indices = list(indices_afectados)
+    afectados = pd.Series(df_calculado.index.isin(indices), index=df_calculado.index)
+    sin_costo_valido = afectados & ~tiene_costo_valido(df_calculado["Costo"])
+    precios_actualizados = calcular_mascara_precios_actualizados(
+        df_calculado, set(indices)
+    )
+
+    return {
+        "afectados": int(afectados.sum()),
+        "precios_actualizados": int(precios_actualizados.sum()),
+        "sin_costo_valido": int(sin_costo_valido.sum()),
+    }
+
+
+def construir_mensaje_aplicacion(
+    prefijo: str, df_calculado: pd.DataFrame, indices_afectados, alcance: str
+) -> str:
+    """Construye mensajes claros para acciones masivas o por producto."""
+    resumen = calcular_resumen_aplicacion(df_calculado, indices_afectados)
+    return (
+        f"{prefijo} aplicado a {resumen['afectados']} productos {alcance}. "
+        f"{resumen['precios_actualizados']} precios fueron actualizados. "
+        f"{resumen['sin_costo_valido']} productos quedaron sin modificar "
+        "por no tener costo válido."
+    )
+
+
 def calcular_mascara_modificados(
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
     indices_afectados: set,
 ) -> pd.Series:
-    """Marca como modificados solo productos editados o afectados por una acción explícita."""
-    multiplicador_modificado = df_calculado["Multiplicador"].fillna(1).ne(1)
+    """Marca solo filas con precio final cambiado o costo editado."""
     costo_original = costos_originales.reindex(df_calculado.index)
     costo_editado = df_calculado["Costo"]
     costo_modificado = series_diferentes(costo_editado, costo_original)
+    multiplicador_modificado = df_calculado["Multiplicador"].fillna(1).ne(1)
     afectado_por_accion = pd.Series(
         df_calculado.index.isin(indices_afectados), index=df_calculado.index
     )
+    candidato_a_actualizar_precio = (
+        afectado_por_accion | multiplicador_modificado | costo_modificado
+    )
+    precio_actualizado = (
+        calcular_mascara_precios_actualizados(df_calculado)
+        & candidato_a_actualizar_precio
+    )
 
-    return multiplicador_modificado | costo_modificado | afectado_por_accion
+    return precio_actualizado | costo_modificado
 
 
 def obtener_estado_revision(fila: pd.Series, modificado: bool) -> str:
@@ -436,6 +506,34 @@ def obtener_metricas_csv(df: pd.DataFrame) -> tuple[int, int | None, int | None]
     return filas_csv, productos_unicos, variantes_repetidas
 
 
+def obtener_productos_con_variantes(df: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve filas cuyo Identificador de URL aparece más de una vez."""
+    columnas_disponibles = [
+        columna for columna in COLUMNAS_VARIANTES if columna in df.columns
+    ]
+    if COLUMNA_IDENTIFICADOR_URL not in df.columns:
+        return pd.DataFrame(columns=columnas_disponibles)
+
+    identificadores = df[COLUMNA_IDENTIFICADOR_URL].astype(str).str.strip()
+    mascara_variantes = identificadores.ne("") & identificadores.duplicated(keep=False)
+    return df.loc[mascara_variantes, columnas_disponibles]
+
+
+def mostrar_productos_con_variantes(df: pd.DataFrame) -> None:
+    """Muestra la sección que individualiza variantes/filas repetidas."""
+    st.subheader("Productos con variantes")
+    productos_con_variantes = obtener_productos_con_variantes(df)
+
+    if productos_con_variantes.empty:
+        st.info("No se detectaron productos con variantes.")
+        return
+
+    st.write(
+        "Estas filas no son errores: Tienda Nube usa más de una fila cuando un producto tiene variantes."
+    )
+    st.dataframe(productos_con_variantes, use_container_width=True, hide_index=True)
+
+
 def generar_csv_descarga(
     df_final: pd.DataFrame, separador: str, encoding: str | None = "utf-8"
 ) -> bytes:
@@ -537,6 +635,7 @@ def main() -> None:
     st.caption(
         "El CSV puede tener más filas que productos porque Tienda Nube usa una fila por variante."
     )
+    mostrar_productos_con_variantes(df)
     st.write(f"Columnas: **{df.shape[1]}**")
     st.write(f"Separador detectado: **{repr(separador)}**")
     st.write(
@@ -581,21 +680,27 @@ def main() -> None:
             format="%.4f",
         )
         aplicar_global = col_boton_global.form_submit_button(
-            "Aplicar a todos los productos con costo"
+            "Aplicar a todos los productos"
         )
 
     if aplicar_global:
         tabla_actual = st.session_state["tabla_trabajo"].copy()
-        mascara_con_costo = tiene_costo_valido(tabla_actual["Costo"])
-        indices_actualizados = tabla_actual.index[mascara_con_costo].tolist()
-        tabla_actual.loc[mascara_con_costo, "Multiplicador"] = multiplicador_global
+        indices_afectados_accion = tabla_actual.index.tolist()
+        tabla_actual.loc[indices_afectados_accion, "Multiplicador"] = (
+            multiplicador_global
+        )
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
-        st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["indices_afectados"].update(indices_afectados_accion)
         st.session_state["editor_version"] += 1
-        actualizar_ultimo_producto(tabla_actual, indices_actualizados)
+        actualizar_ultimo_producto(tabla_actual, indices_afectados_accion)
         st.success(
-            f"Multiplicador {multiplicador_global} aplicado a {len(indices_actualizados)} productos con costo."
+            construir_mensaje_aplicacion(
+                f"Multiplicador {multiplicador_global}",
+                tabla_actual,
+                indices_afectados_accion,
+                "del CSV",
+            )
         )
 
     st.subheader("Margen objetivo")
@@ -610,25 +715,28 @@ def main() -> None:
             format="%.2f",
         )
         aplicar_margen_objetivo = col_boton_margen.form_submit_button(
-            "Aplicar margen objetivo a todos los productos con costo"
+            "Aplicar margen objetivo a todos los productos"
         )
 
     if aplicar_margen_objetivo:
         tabla_actual = st.session_state["tabla_trabajo"].copy()
-        mascara_con_costo = tiene_costo_valido(tabla_actual["Costo"])
-        indices_actualizados = tabla_actual.index[mascara_con_costo].tolist()
-        productos_sin_costo = int((~mascara_con_costo).sum())
+        indices_afectados_accion = tabla_actual.index.tolist()
         multiplicador_margen = 1 + margen_objetivo / 100
-        tabla_actual.loc[mascara_con_costo, "Multiplicador"] = multiplicador_margen
+        tabla_actual.loc[indices_afectados_accion, "Multiplicador"] = (
+            multiplicador_margen
+        )
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
-        st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["indices_afectados"].update(indices_afectados_accion)
         st.session_state["editor_version"] += 1
-        actualizar_ultimo_producto(tabla_actual, indices_actualizados)
+        actualizar_ultimo_producto(tabla_actual, indices_afectados_accion)
         st.success(
-            "Margen objetivo aplicado a "
-            f"{len(indices_actualizados)} productos con costo válido. "
-            f"{productos_sin_costo} productos quedaron sin modificar por no tener costo."
+            construir_mensaje_aplicacion(
+                f"Margen objetivo {margen_objetivo}%",
+                tabla_actual,
+                indices_afectados_accion,
+                "del CSV",
+            )
         )
 
     st.subheader("Restaurar simulación")
@@ -667,15 +775,20 @@ def main() -> None:
     if aplicar_masivo and marcas:
         tabla_actual = st.session_state["tabla_trabajo"].copy()
         mascara_marca = tabla_actual["Marca"].astype(str) == str(marca_seleccionada)
-        indices_actualizados = tabla_actual.index[mascara_marca].tolist()
+        indices_afectados_accion = tabla_actual.index[mascara_marca].tolist()
         tabla_actual.loc[mascara_marca, "Multiplicador"] = multiplicador_masivo
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
-        st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["indices_afectados"].update(indices_afectados_accion)
         st.session_state["editor_version"] += 1
-        actualizar_ultimo_producto(tabla_actual, indices_actualizados)
+        actualizar_ultimo_producto(tabla_actual, indices_afectados_accion)
         st.success(
-            f"Multiplicador {multiplicador_masivo} aplicado a {len(indices_actualizados)} productos."
+            construir_mensaje_aplicacion(
+                f"Multiplicador {multiplicador_masivo}",
+                tabla_actual,
+                indices_afectados_accion,
+                "de la marca",
+            )
         )
 
     st.subheader("Multiplicador por producto")
@@ -730,7 +843,12 @@ def main() -> None:
             tabla_actual.loc[producto_seleccionado]
         )
         st.success(
-            f"Multiplicador {multiplicador_producto} aplicado al producto: {producto_aplicado}."
+            construir_mensaje_aplicacion(
+                f"Multiplicador {multiplicador_producto}",
+                tabla_actual,
+                [producto_seleccionado],
+                f"del producto: {producto_aplicado}",
+            )
         )
 
     if st.session_state.get("ultimo_producto_modificado") is not None:
