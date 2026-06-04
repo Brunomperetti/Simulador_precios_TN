@@ -453,11 +453,11 @@ def mostrar_advertencias_exportacion(
 
 
 def formatear_numero_tienda_nube(valor) -> str:
-    """Formatea números para exportación con punto decimal y sin separador de miles."""
+    """Formatea números para Tienda Nube: miles con coma y decimal con punto."""
     if pd.isna(valor):
         return ""
 
-    return f"{float(valor):.2f}"
+    return f"{float(valor):,.2f}"
 
 
 def construir_dataframe_exportacion(
@@ -466,7 +466,7 @@ def construir_dataframe_exportacion(
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
 ) -> pd.DataFrame:
-    """Conserva estructura original y exporta solo cambios explícitos de Precio/Costo."""
+    """Conserva columnas originales y actualiza solo Precio para compatibilidad."""
     df_final = df_original.copy()
     if indices_afectados is None:
         indices_afectados = set()
@@ -482,17 +482,120 @@ def construir_dataframe_exportacion(
     ].map(formatear_numero_tienda_nube)
     df_final["Precio"] = precios_exportados
 
-    costos_exportados = df_original["Costo"].copy()
-    costos_editados = series_diferentes(
-        df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
+    return df_final
+
+
+def separar_salto_linea(linea: str) -> tuple[str, str]:
+    """Separa el contenido del registro de su salto de línea original."""
+    if linea.endswith("\r\n"):
+        return linea[:-2], "\r\n"
+    if linea.endswith("\n") or linea.endswith("\r"):
+        return linea[:-1], linea[-1]
+    return linea, ""
+
+
+def obtener_spans_campos_csv(linea: str, separador: str) -> list[tuple[int, int]]:
+    """Devuelve posiciones de campos CSV sin reserializar la línea original."""
+    contenido, _ = separar_salto_linea(linea)
+    spans = []
+    inicio = 0
+    en_comillas = False
+    indice = 0
+
+    while indice < len(contenido):
+        caracter = contenido[indice]
+        if caracter == '"':
+            if (
+                en_comillas
+                and indice + 1 < len(contenido)
+                and contenido[indice + 1] == '"'
+            ):
+                indice += 2
+                continue
+            en_comillas = not en_comillas
+        elif caracter == separador and not en_comillas:
+            spans.append((inicio, indice))
+            inicio = indice + 1
+        indice += 1
+
+    spans.append((inicio, len(contenido)))
+    return spans
+
+
+def reemplazar_campo_csv_preservando_linea(
+    linea: str, separador: str, indice_columna: int, nuevo_valor: str
+) -> str:
+    """Reemplaza un único campo manteniendo intacto el resto del registro."""
+    contenido, salto_linea = separar_salto_linea(linea)
+    spans = obtener_spans_campos_csv(linea, separador)
+    if indice_columna >= len(spans):
+        return linea
+
+    inicio, fin = spans[indice_columna]
+    campo_original = contenido[inicio:fin]
+    campo_izquierda = campo_original.lstrip()
+    espacios_iniciales = campo_original[: len(campo_original) - len(campo_izquierda)]
+    campo_derecha = campo_izquierda.rstrip()
+    espacios_finales = campo_izquierda[len(campo_derecha) :]
+
+    if campo_derecha.startswith('"') and campo_derecha.endswith('"'):
+        nuevo_campo = f'{espacios_iniciales}"{nuevo_valor.replace(chr(34), chr(34) * 2)}"{espacios_finales}'
+    else:
+        nuevo_campo = f"{espacios_iniciales}{nuevo_valor}{espacios_finales}"
+
+    return contenido[:inicio] + nuevo_campo + contenido[fin:] + salto_linea
+
+
+def generar_csv_descarga_preservando_original(
+    contenido_original: bytes,
+    df_original: pd.DataFrame,
+    df_calculado: pd.DataFrame,
+    costos_originales: pd.Series,
+    separador: str,
+    encoding: str | None = None,
+    indices_afectados: set | None = None,
+) -> bytes:
+    """
+    Exporta usando el CSV subido como base y cambia solamente Precio en filas modificadas.
+
+    A diferencia de pandas.to_csv, esta función conserva encabezado, columnas, comillas,
+    orden, separador, saltos de línea y filas no modificadas byte a byte siempre que la
+    codificación original pueda reutilizarse.
+    """
+    encoding_lectura = encoding or detectar_codificacion(contenido_original)
+    texto_original = contenido_original.decode(encoding_lectura)
+    lineas = texto_original.splitlines(keepends=True)
+    if not lineas:
+        return contenido_original
+
+    indice_precio = list(df_original.columns).index("Precio")
+    if indices_afectados is None:
+        indices_afectados = set()
+
+    mascara_modificados = calcular_mascara_modificados(
+        df_calculado, costos_originales, indices_afectados
     )
-    costos_con_valor = pd.to_numeric(df_calculado["Costo"], errors="coerce")
-    costos_exportados.loc[costos_editados] = costos_con_valor.loc[costos_editados].map(
+    nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
+    mascara_actualizar_precio = mascara_modificados & nuevos_precios.notna()
+    precios_por_indice = nuevos_precios.loc[mascara_actualizar_precio].map(
         formatear_numero_tienda_nube
     )
-    df_final["Costo"] = costos_exportados
 
-    return df_final
+    lineas_exportadas = lineas.copy()
+    for posicion, indice_df in enumerate(df_original.index, start=1):
+        if (
+            posicion >= len(lineas_exportadas)
+            or indice_df not in precios_por_indice.index
+        ):
+            continue
+        lineas_exportadas[posicion] = reemplazar_campo_csv_preservando_linea(
+            lineas_exportadas[posicion],
+            separador,
+            indice_precio,
+            precios_por_indice.loc[indice_df],
+        )
+
+    return "".join(lineas_exportadas).encode(encoding_lectura)
 
 
 def obtener_metricas_csv(df: pd.DataFrame) -> tuple[int, int | None, int | None]:
@@ -933,16 +1036,19 @@ def main() -> None:
     )[COLUMNAS_RESULTADO_CALCULADO].head(LIMITE_VISTA_PREVIA)
     mostrar_tabla_revision(resultado_calculado, config_columnas)
 
-    # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
-    df_final = construir_dataframe_exportacion(
-        df, df_calculado, costos_originales, indices_afectados
-    )
-
     st.subheader("Exportar CSV final")
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
     st.download_button(
         label="Descargar CSV para Tienda Nube",
-        data=generar_csv_descarga(df_final, separador, codificacion),
+        data=generar_csv_descarga_preservando_original(
+            contenido,
+            df,
+            df_calculado,
+            costos_originales,
+            separador,
+            codificacion,
+            indices_afectados,
+        ),
         file_name="tienda_nube_precios_actualizados.csv",
         mime="text/csv",
     )
