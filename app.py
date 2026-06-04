@@ -17,9 +17,14 @@ COLUMNAS_BASE_VISTA = [
     "Multiplicador",
     "Nuevo Precio",
 ]
-COLUMNAS_ULTIMO_PRODUCTO = COLUMNAS_BASE_VISTA + ["Diferencia $", "Diferencia %"]
-COLUMNAS_PRODUCTOS_MODIFICADOS = COLUMNAS_ULTIMO_PRODUCTO
-COLUMNAS_BUSQUEDA_SIMULACION = COLUMNAS_ULTIMO_PRODUCTO
+COLUMNAS_REVISION = COLUMNAS_BASE_VISTA + ["Estado", "Diferencia $", "Diferencia %"]
+COLUMNAS_ULTIMO_PRODUCTO = COLUMNAS_REVISION
+COLUMNAS_PRODUCTOS_MODIFICADOS = COLUMNAS_REVISION
+COLUMNAS_BUSQUEDA_SIMULACION = COLUMNAS_REVISION
+COLUMNAS_RESULTADO_CALCULADO = COLUMNAS_REVISION
+REFERENCIA_ESTADOS = (
+    "Referencia: 🟢 Sube precio | 🔴 Baja precio | 🟡 Sin costo | ⚪ Sin cambios"
+)
 
 
 def detectar_separador(contenido: bytes) -> str:
@@ -195,9 +200,26 @@ def calcular_mascara_modificados(
     return multiplicador_modificado | costo_modificado | afectado_por_accion
 
 
+def obtener_estado_revision(fila: pd.Series) -> str:
+    """Describe el estado visual de una fila sin colorear toda la tabla."""
+    costo = fila.get("Costo")
+    precio_actual = fila.get("Precio")
+    nuevo_precio = fila.get("Nuevo Precio")
+
+    if pd.isna(costo) or str(costo).strip() == "" or pd.isna(nuevo_precio):
+        return "🟡 Sin costo"
+    if pd.notna(precio_actual) and nuevo_precio > precio_actual:
+        return "🟢 Sube precio"
+    if pd.notna(precio_actual) and nuevo_precio < precio_actual:
+        return "🔴 Baja precio"
+
+    return "⚪ Sin cambios"
+
+
 def preparar_vista_con_diferencias(df_calculado: pd.DataFrame) -> pd.DataFrame:
-    """Agrega diferencias absolutas y porcentuales contra el precio actual."""
+    """Agrega estado y diferencias contra el precio actual para revisar cambios."""
     df_vista = df_calculado.copy()
+    df_vista["Estado"] = df_vista.apply(obtener_estado_revision, axis=1)
     df_vista["Diferencia $"] = df_vista["Nuevo Precio"] - df_vista["Precio"]
     df_vista["Diferencia %"] = (
         df_vista["Diferencia $"] / df_vista["Precio"].replace(0, pd.NA)
@@ -325,45 +347,17 @@ def obtener_config_columnas() -> dict:
             "Multiplicador aplicado", min_value=0.0, step=0.1, format="%.4f"
         ),
         "Nuevo Precio": st.column_config.NumberColumn("Nuevo Precio", format="%.2f"),
+        "Estado": st.column_config.TextColumn("Estado"),
         "Diferencia $": st.column_config.NumberColumn("Diferencia $", format="%.2f"),
         "Diferencia %": st.column_config.NumberColumn("Diferencia %", format="%.2f%%"),
     }
 
 
-def colorear_filas_revision(df_vista: pd.DataFrame):
-    """Colorea filas de revisión según precio simulado y costo disponible."""
-
-    def estilo_fila(fila: pd.Series) -> list[str]:
-        costo = fila.get("Costo")
-        precio_actual = fila.get("Precio")
-        nuevo_precio = fila.get("Nuevo Precio")
-
-        if pd.isna(costo) or str(costo).strip() == "":
-            color = "background-color: #fff3cd"
-        elif (
-            pd.notna(nuevo_precio)
-            and pd.notna(precio_actual)
-            and nuevo_precio > precio_actual
-        ):
-            color = "background-color: #d1e7dd"
-        elif (
-            pd.notna(nuevo_precio)
-            and pd.notna(precio_actual)
-            and nuevo_precio < precio_actual
-        ):
-            color = "background-color: #f8d7da"
-        else:
-            color = ""
-
-        return [color] * len(fila)
-
-    return df_vista.style.apply(estilo_fila, axis=1)
-
-
 def mostrar_tabla_revision(df_vista: pd.DataFrame, config_columnas: dict) -> None:
-    """Muestra una tabla de revisión con colores de ayuda visual."""
+    """Muestra una tabla de revisión con referencia visual por estado."""
+    st.caption(REFERENCIA_ESTADOS)
     st.dataframe(
-        colorear_filas_revision(df_vista),
+        df_vista,
         use_container_width=True,
         hide_index=True,
         column_config=config_columnas,
@@ -664,7 +658,10 @@ def main() -> None:
     mostrar_tabla_revision(productos_encontrados, config_columnas)
 
     st.subheader("Resultado calculado")
-    mostrar_tabla_revision(df_calculado, config_columnas)
+    resultado_calculado = preparar_vista_con_diferencias(df_calculado)[
+        COLUMNAS_RESULTADO_CALCULADO
+    ]
+    mostrar_tabla_revision(resultado_calculado, config_columnas)
 
     # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
     df_final = df.copy()
