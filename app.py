@@ -7,6 +7,7 @@ import streamlit as st
 
 # Columnas mínimas que necesita el simulador para trabajar con el CSV de Tienda Nube.
 COLUMNAS_REQUERIDAS = ["Nombre", "Marca", "SKU", "Precio", "Costo"]
+COLUMNA_IDENTIFICADOR_URL = "Identificador de URL"
 COLUMNAS_BASE_VISTA = [
     "Nombre",
     "Marca",
@@ -342,16 +343,56 @@ def mostrar_advertencias_exportacion(
         st.success("Control de exportación OK: no se detectaron problemas.")
 
 
-def formato_precio(valor) -> str:
-    """Formatea el precio para el CSV final evitando valores 'nan'."""
+def formatear_numero_tienda_nube(valor) -> str:
+    """Formatea números con coma de miles, punto decimal y 2 decimales."""
     if pd.isna(valor):
         return ""
 
-    numero = float(valor)
-    if numero.is_integer():
-        return str(int(numero))
+    return f"{float(valor):,.2f}"
 
-    return f"{numero:.2f}"
+
+def construir_dataframe_exportacion(
+    df_original: pd.DataFrame,
+    df_calculado: pd.DataFrame,
+    costos_originales: pd.Series,
+) -> pd.DataFrame:
+    """Conserva estructura original y actualiza solo Precio/Costo bajo reglas de exportación."""
+    df_final = df_original.copy()
+
+    nuevos_precios = pd.to_numeric(
+        df_calculado["Nuevo Precio"].map(normalizar_numero), errors="coerce"
+    )
+    precios_exportados = df_original["Precio"].copy()
+    mascara_nuevo_precio_valido = nuevos_precios.notna()
+    precios_exportados.loc[mascara_nuevo_precio_valido] = nuevos_precios.loc[
+        mascara_nuevo_precio_valido
+    ].map(formatear_numero_tienda_nube)
+    df_final["Precio"] = precios_exportados
+
+    costos_exportados = df_original["Costo"].copy()
+    costos_editados = series_diferentes(
+        df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
+    )
+    costos_con_valor = pd.to_numeric(
+        df_calculado["Costo"].map(normalizar_numero), errors="coerce"
+    )
+    costos_exportados.loc[costos_editados] = costos_con_valor.loc[costos_editados].map(
+        formatear_numero_tienda_nube
+    )
+    df_final["Costo"] = costos_exportados
+
+    return df_final
+
+
+def obtener_metricas_csv(df: pd.DataFrame) -> tuple[int, int | None, int | None]:
+    """Devuelve filas, productos únicos por URL y filas repetidas/variantes."""
+    filas_csv = int(df.shape[0])
+    if COLUMNA_IDENTIFICADOR_URL not in df.columns:
+        return filas_csv, None, None
+
+    productos_unicos = int(df[COLUMNA_IDENTIFICADOR_URL].astype(str).nunique())
+    variantes_repetidas = filas_csv - productos_unicos
+    return filas_csv, productos_unicos, variantes_repetidas
 
 
 def generar_csv_descarga(df_final: pd.DataFrame, separador: str) -> bytes:
@@ -431,7 +472,21 @@ def main() -> None:
         st.stop()
 
     st.success("CSV cargado correctamente")
-    st.write(f"Filas: **{df.shape[0]}**")
+    filas_csv, productos_unicos, variantes_repetidas = obtener_metricas_csv(df)
+    columnas_metricas = st.columns(3)
+    columnas_metricas[0].metric("Filas del CSV", filas_csv)
+    if productos_unicos is None:
+        columnas_metricas[1].metric("Productos únicos", "-")
+        columnas_metricas[2].metric("Variantes/filas repetidas", "-")
+        st.warning(
+            f"No se encontró la columna {COLUMNA_IDENTIFICADOR_URL!r} para contar productos únicos."
+        )
+    else:
+        columnas_metricas[1].metric("Productos únicos", productos_unicos)
+        columnas_metricas[2].metric("Variantes/filas repetidas", variantes_repetidas)
+    st.caption(
+        "El CSV puede tener más filas que productos porque Tienda Nube usa una fila por variante."
+    )
     st.write(f"Columnas: **{df.shape[1]}**")
     st.write(f"Separador detectado: **{repr(separador)}**")
 
@@ -707,9 +762,7 @@ def main() -> None:
     mostrar_tabla_revision(resultado_calculado, config_columnas)
 
     # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
-    df_final = df.copy()
-    df_final["Precio"] = df_calculado["Nuevo Precio"].map(formato_precio)
-    df_final["Costo"] = df_calculado["Costo"].map(formato_precio)
+    df_final = construir_dataframe_exportacion(df, df_calculado, costos_originales)
 
     st.subheader("Exportar CSV final")
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
