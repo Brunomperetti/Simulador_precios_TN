@@ -23,8 +23,10 @@ COLUMNAS_PRODUCTOS_MODIFICADOS = COLUMNAS_REVISION
 COLUMNAS_BUSQUEDA_SIMULACION = COLUMNAS_REVISION
 COLUMNAS_RESULTADO_CALCULADO = COLUMNAS_REVISION
 REFERENCIA_ESTADOS = (
-    "Referencia: 🟢 Sube precio | 🔴 Baja precio | 🟡 Sin costo | ⚪ Sin cambios"
+    "Referencia: 🟢 Sube precio | 🔴 Baja precio | 🟡 Sin costo | "
+    "⚪ Sin modificar / sin cambios"
 )
+LIMITE_VISTA_PREVIA = 50
 
 
 def detectar_separador(contenido: bytes) -> str:
@@ -200,8 +202,11 @@ def calcular_mascara_modificados(
     return multiplicador_modificado | costo_modificado | afectado_por_accion
 
 
-def obtener_estado_revision(fila: pd.Series) -> str:
-    """Describe el estado visual de una fila sin colorear toda la tabla."""
+def obtener_estado_revision(fila: pd.Series, modificado: bool) -> str:
+    """Describe el estado visual de una fila según si fue modificada explícitamente."""
+    if not modificado:
+        return "⚪ Sin modificar"
+
     costo = fila.get("Costo")
     precio_actual = fila.get("Precio")
     nuevo_precio = fila.get("Nuevo Precio")
@@ -216,10 +221,23 @@ def obtener_estado_revision(fila: pd.Series) -> str:
     return "⚪ Sin cambios"
 
 
-def preparar_vista_con_diferencias(df_calculado: pd.DataFrame) -> pd.DataFrame:
+def preparar_vista_con_diferencias(
+    df_calculado: pd.DataFrame,
+    mascara_modificados: pd.Series | None = None,
+) -> pd.DataFrame:
     """Agrega estado y diferencias contra el precio actual para revisar cambios."""
     df_vista = df_calculado.copy()
-    df_vista["Estado"] = df_vista.apply(obtener_estado_revision, axis=1)
+    if mascara_modificados is None:
+        mascara_modificados = pd.Series(False, index=df_vista.index)
+    else:
+        mascara_modificados = mascara_modificados.reindex(
+            df_vista.index, fill_value=False
+        )
+
+    df_vista["Estado"] = [
+        obtener_estado_revision(fila, bool(mascara_modificados.loc[indice]))
+        for indice, fila in df_vista.iterrows()
+    ]
     df_vista["Diferencia $"] = df_vista["Nuevo Precio"] - df_vista["Precio"]
     df_vista["Diferencia %"] = (
         df_vista["Diferencia $"] / df_vista["Precio"].replace(0, pd.NA)
@@ -234,10 +252,10 @@ def preparar_vista_cambios(
     indices_afectados: set,
 ) -> pd.DataFrame:
     """Prepara la tabla de productos realmente modificados."""
-    df_cambios = preparar_vista_con_diferencias(df_calculado)
     mascara_modificados = calcular_mascara_modificados(
-        df_cambios, costos_originales, indices_afectados
+        df_calculado, costos_originales, indices_afectados
     )
+    df_cambios = preparar_vista_con_diferencias(df_calculado, mascara_modificados)
 
     return df_cambios.loc[mascara_modificados, COLUMNAS_PRODUCTOS_MODIFICADOS]
 
@@ -285,15 +303,23 @@ def mostrar_resumen_cambios(
     )
 
 
-def mostrar_advertencias_exportacion(df_calculado: pd.DataFrame) -> None:
+def mostrar_advertencias_exportacion(
+    df_calculado: pd.DataFrame, mascara_modificados: pd.Series
+) -> None:
     """Advierte problemas que conviene resolver antes de descargar el CSV final."""
+    mascara_modificados = mascara_modificados.reindex(
+        df_calculado.index, fill_value=False
+    )
     productos_sin_costo = int((~tiene_costo_valido(df_calculado["Costo"])).sum())
     productos_sin_nuevo_precio = int(df_calculado["Nuevo Precio"].isna().sum())
     productos_precio_menor_costo = int(
         df_calculado["Nuevo Precio"].lt(df_calculado["Costo"]).sum()
     )
-    productos_precio_menor_actual = int(
-        df_calculado["Nuevo Precio"].lt(df_calculado["Precio"]).sum()
+    productos_modificados_menor_actual = int(
+        (
+            df_calculado["Nuevo Precio"].lt(df_calculado["Precio"])
+            & mascara_modificados
+        ).sum()
     )
 
     advertencias = []
@@ -305,9 +331,9 @@ def mostrar_advertencias_exportacion(df_calculado: pd.DataFrame) -> None:
         advertencias.append(
             f"{productos_precio_menor_costo} productos con nuevo precio menor al costo"
         )
-    if productos_precio_menor_actual:
+    if productos_modificados_menor_actual:
         advertencias.append(
-            f"{productos_precio_menor_actual} productos donde el precio simulado queda por debajo del precio publicado actual"
+            f"{productos_modificados_menor_actual} productos modificados quedan por debajo del precio publicado actual"
         )
 
     if advertencias:
@@ -371,8 +397,9 @@ def actualizar_ultimo_producto(df_calculado: pd.DataFrame, indices_modificados) 
         return
 
     ultimo_indice = indices_modificados[-1]
+    mascara_modificado = pd.Series(True, index=[ultimo_indice])
     st.session_state["ultimo_producto_modificado"] = preparar_vista_con_diferencias(
-        df_calculado.loc[[ultimo_indice]]
+        df_calculado.loc[[ultimo_indice]], mascara_modificado
     )[COLUMNAS_ULTIMO_PRODUCTO]
 
 
@@ -434,6 +461,7 @@ def main() -> None:
     config_columnas = obtener_config_columnas()
 
     st.subheader("Multiplicador global")
+    st.caption("Ejemplo: 2 = costo x 2")
     with st.form("multiplicador_global"):
         col_global, col_boton_global = st.columns([1, 2])
         multiplicador_global = col_global.number_input(
@@ -462,6 +490,7 @@ def main() -> None:
         )
 
     st.subheader("Margen objetivo")
+    st.caption("Ejemplo: 30% = costo x 1.30")
     with st.form("margen_objetivo"):
         col_margen, col_boton_margen = st.columns([1, 2])
         margen_objetivo = col_margen.number_input(
@@ -507,6 +536,7 @@ def main() -> None:
         st.success("Simulación restaurada. Se mantuvieron los costos editados.")
 
     st.subheader("Multiplicador masivo por marca")
+    st.caption("Aplicá un multiplicador a todos los productos de una marca.")
     marcas = sorted(
         marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
     )
@@ -540,6 +570,7 @@ def main() -> None:
         )
 
     st.subheader("Multiplicador por producto")
+    st.caption("Aplicá un multiplicador solo a un producto específico.")
     st.write(
         "Buscá por **Nombre**, **SKU** o **Marca** y aplicá el cambio solo al producto elegido."
     )
@@ -635,6 +666,9 @@ def main() -> None:
 
     costos_originales = st.session_state["costos_originales"]
     indices_afectados = st.session_state["indices_afectados"]
+    mascara_modificados = calcular_mascara_modificados(
+        df_calculado, costos_originales, indices_afectados
+    )
     mostrar_resumen_cambios(df_calculado, costos_originales, indices_afectados)
 
     st.subheader("Productos modificados")
@@ -651,16 +685,25 @@ def main() -> None:
         "Buscar en la simulación por Nombre, SKU o Marca",
         key="busqueda_simulacion",
     )
-    productos_encontrados = preparar_vista_con_diferencias(
-        filtrar_productos(df_calculado, busqueda_simulacion)
-    )[COLUMNAS_BUSQUEDA_SIMULACION]
-    st.caption(f"Coincidencias: {len(productos_encontrados)}")
-    mostrar_tabla_revision(productos_encontrados, config_columnas)
+    if busqueda_simulacion.strip():
+        productos_filtrados_simulacion = filtrar_productos(
+            df_calculado, busqueda_simulacion
+        )
+        productos_encontrados = preparar_vista_con_diferencias(
+            productos_filtrados_simulacion, mascara_modificados
+        )[COLUMNAS_BUSQUEDA_SIMULACION]
+        st.caption(f"Coincidencias: {len(productos_encontrados)}")
+        mostrar_tabla_revision(productos_encontrados, config_columnas)
+    else:
+        st.info("Buscá por nombre, SKU o marca para revisar productos específicos.")
 
-    st.subheader("Resultado calculado")
-    resultado_calculado = preparar_vista_con_diferencias(df_calculado)[
-        COLUMNAS_RESULTADO_CALCULADO
-    ]
+    st.subheader("Vista previa de la simulación")
+    st.caption(
+        "Vista previa limitada para revisión rápida. El CSV final se exporta completo."
+    )
+    resultado_calculado = preparar_vista_con_diferencias(
+        df_calculado, mascara_modificados
+    )[COLUMNAS_RESULTADO_CALCULADO].head(LIMITE_VISTA_PREVIA)
     mostrar_tabla_revision(resultado_calculado, config_columnas)
 
     # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
@@ -669,7 +712,7 @@ def main() -> None:
     df_final["Costo"] = df_calculado["Costo"].map(formato_precio)
 
     st.subheader("Exportar CSV final")
-    mostrar_advertencias_exportacion(df_calculado)
+    mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
     st.download_button(
         label="Descargar CSV para Tienda Nube",
         data=generar_csv_descarga(df_final, separador),
