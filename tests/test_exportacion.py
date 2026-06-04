@@ -11,6 +11,7 @@ from app import (
     construir_mensaje_aplicacion,
     detectar_codificacion,
     generar_csv_descarga,
+    generar_csv_descarga_preservando_original,
     obtener_metricas_csv,
     obtener_productos_con_variantes,
     preparar_tabla_trabajo,
@@ -88,10 +89,10 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             df_original, df_calculado, costos_originales
         )
 
-        self.assertEqual(df_exportado.loc[1, "Precio"], "21906.60")
+        self.assertEqual(df_exportado.loc[1, "Precio"], "21,906.60")
         self.assertEqual(df_exportado.loc[2, "Precio"], df_original.loc[2, "Precio"])
 
-    def test_csv_exportado_precio_usa_float_y_sin_separador_de_miles(self):
+    def test_csv_exportado_precio_usa_float_y_formato_tienda_nube(self):
         columnas = [
             "Identificador de URL",
             "Nombre",
@@ -140,9 +141,9 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(float(df_calculado.loc[0, "Nuevo Precio"]), 8762.64 * 2.4)
         self.assertEqual(round(df_calculado.loc[0, "Nuevo Precio"], 2), 21030.34)
         self.assertEqual(round(df_calculado.loc[1, "Nuevo Precio"], 2), 66402.62)
-        self.assertEqual(df_releido.loc[0, "Precio"], "21030.34")
-        self.assertEqual(df_releido.loc[1, "Precio"], "66402.62")
-        self.assertNotIn("21,030.34", csv_exportado.decode("utf-8-sig"))
+        self.assertEqual(df_releido.loc[0, "Precio"], "21,030.34")
+        self.assertEqual(df_releido.loc[1, "Precio"], "66,402.62")
+        self.assertIn("21,030.34", csv_exportado.decode("utf-8-sig"))
         self.assertNotIn("21.030,34", csv_exportado.decode("utf-8-sig"))
         self.assertNotIn("21,030,336.00", csv_exportado.decode("utf-8-sig"))
 
@@ -177,7 +178,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             keep_default_na=False,
         )
 
-        self.assertEqual(df_releido.loc[1, "Precio"], "21906.60")
+        self.assertEqual(df_releido.loc[1, "Precio"], "21,906.60")
         self.assertEqual(df_releido.loc[2, "Precio"], df_original.loc[2, "Precio"])
         self.assertEqual(df_releido.loc[3, "Precio"], df_original.loc[3, "Precio"])
 
@@ -217,9 +218,9 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(list(df_releido.columns), list(df_original.columns))
         self.assertNotIn("Nuevo Precio", df_releido.columns)
         self.assertNotIn("Multiplicador", df_releido.columns)
-        self.assertEqual(df_releido.loc[1, "Precio"], "17525.28")
+        self.assertEqual(df_releido.loc[1, "Precio"], "17,525.28")
         self.assertEqual(df_releido.loc[1, "Costo"], "8,762.64")
-        self.assertEqual(df_releido.loc[2, "Costo"], "9000.00")
+        self.assertEqual(df_releido.loc[2, "Costo"], "8,762.64")
 
     def test_csv_exportado_imita_formato_tienda_nube_sin_bom_y_con_quote_minimal(self):
         columnas = [
@@ -274,7 +275,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertTrue(all(len(fila) == len(columnas) for fila in filas_exportadas))
         self.assertEqual(filas_exportadas[0], columnas)
         self.assertIn('"Producto A; edición especial"', texto_exportado)
-        self.assertEqual(filas_exportadas[2][columnas.index("Precio")], "12500.00")
+        self.assertEqual(filas_exportadas[2][columnas.index("Precio")], "12,500.00")
         self.assertEqual(filas_exportadas[1][columnas.index("Precio")], "16,850.00")
 
     def test_metricas_csv_cuenta_productos_unicos_y_variantes(self):
@@ -435,6 +436,75 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
 
         self.assertEqual(df_releido.shape, (394, 30))
         self.assertEqual(list(df_releido.columns), columnas)
+
+    def test_exportacion_preserva_original_y_cambia_solo_precio(self):
+        columnas = [
+            "Identificador de URL",
+            "Nombre",
+            "Marca",
+            "SKU",
+            "Precio",
+            "Costo",
+        ] + [f"Columna {numero}" for numero in range(7, 31)]
+        encabezado = ";".join(f'"{columna}"' for columna in columnas) + "\r\n"
+        lineas = [encabezado]
+        for indice in range(394):
+            precio = "10,000.00" if indice == 1 else "100.00"
+            costo = "8,762.64" if indice == 1 else ("" if indice == 2 else "50.00")
+            campos = [
+                f"producto-{indice}",
+                "Producto 0; edición Ñ" if indice == 0 else f"Producto {indice}",
+                "Marca 1" if indice % 2 == 0 else "Marca 2",
+                f"SKU-{indice}",
+                precio,
+                costo,
+            ] + [f"valor-{indice}-{columna}" for columna in range(7, 31)]
+            lineas.append(";".join(f'"{campo}"' for campo in campos) + "\r\n")
+        csv_original = "".join(lineas).encode("latin1")
+        df_original = pd.read_csv(
+            StringIO(csv_original.decode("latin1")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[1, "Multiplicador"] = 2
+        df_trabajo.loc[2, "Multiplicador"] = 3
+        df_calculado = recalcular_precios(df_trabajo)
+
+        csv_exportado = generar_csv_descarga_preservando_original(
+            csv_original,
+            df_original,
+            df_calculado,
+            costos_originales,
+            ";",
+            "latin1",
+            {1, 2},
+        )
+        lineas_exportadas = csv_exportado.splitlines(keepends=True)
+        fila_original_modificada = next(csv.reader([lineas[1 + 1]], delimiter=";"))
+        fila_exportada_modificada = next(
+            csv.reader([lineas_exportadas[1 + 1].decode("latin1")], delimiter=";")
+        )
+        df_releido = pd.read_csv(
+            StringIO(csv_exportado.decode("latin1")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+
+        self.assertEqual(lineas_exportadas[0], lineas[0].encode("latin1"))
+        self.assertEqual(lineas_exportadas[1], lineas[1].encode("latin1"))
+        self.assertEqual(fila_exportada_modificada[4], "17,525.28")
+        self.assertEqual(fila_exportada_modificada[:4], fila_original_modificada[:4])
+        self.assertEqual(fila_exportada_modificada[5:], fila_original_modificada[5:])
+        self.assertEqual(lineas_exportadas[3], lineas[3].encode("latin1"))
+        self.assertEqual(df_releido.shape, (394, 30))
+        self.assertEqual(list(df_releido.columns), columnas)
+        self.assertNotIn("Nuevo Precio", df_releido.columns)
+        self.assertNotIn("Multiplicador", df_releido.columns)
+        self.assertIn(b'"17,525.28"', csv_exportado)
 
 
 if __name__ == "__main__":
