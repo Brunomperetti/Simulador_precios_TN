@@ -285,7 +285,7 @@ def mostrar_advertencias_exportacion(df_calculado: pd.DataFrame) -> None:
         )
     if productos_precio_menor_actual:
         advertencias.append(
-            f"{productos_precio_menor_actual} productos con nuevo precio menor al precio actual"
+            f"{productos_precio_menor_actual} productos donde el precio simulado queda por debajo del precio publicado actual"
         )
 
     if advertencias:
@@ -328,6 +328,46 @@ def obtener_config_columnas() -> dict:
         "Diferencia $": st.column_config.NumberColumn("Diferencia $", format="%.2f"),
         "Diferencia %": st.column_config.NumberColumn("Diferencia %", format="%.2f%%"),
     }
+
+
+def colorear_filas_revision(df_vista: pd.DataFrame):
+    """Colorea filas de revisión según precio simulado y costo disponible."""
+
+    def estilo_fila(fila: pd.Series) -> list[str]:
+        costo = fila.get("Costo")
+        precio_actual = fila.get("Precio")
+        nuevo_precio = fila.get("Nuevo Precio")
+
+        if pd.isna(costo) or str(costo).strip() == "":
+            color = "background-color: #fff3cd"
+        elif (
+            pd.notna(nuevo_precio)
+            and pd.notna(precio_actual)
+            and nuevo_precio > precio_actual
+        ):
+            color = "background-color: #d1e7dd"
+        elif (
+            pd.notna(nuevo_precio)
+            and pd.notna(precio_actual)
+            and nuevo_precio < precio_actual
+        ):
+            color = "background-color: #f8d7da"
+        else:
+            color = ""
+
+        return [color] * len(fila)
+
+    return df_vista.style.apply(estilo_fila, axis=1)
+
+
+def mostrar_tabla_revision(df_vista: pd.DataFrame, config_columnas: dict) -> None:
+    """Muestra una tabla de revisión con colores de ayuda visual."""
+    st.dataframe(
+        colorear_filas_revision(df_vista),
+        use_container_width=True,
+        hide_index=True,
+        column_config=config_columnas,
+    )
 
 
 def actualizar_ultimo_producto(df_calculado: pd.DataFrame, indices_modificados) -> None:
@@ -395,6 +435,7 @@ def main() -> None:
         st.session_state["indices_afectados"] = set()
         st.session_state["archivo_id"] = archivo_id
         st.session_state["ultimo_producto_modificado"] = None
+        st.session_state["editor_version"] = 0
 
     config_columnas = obtener_config_columnas()
 
@@ -420,10 +461,56 @@ def main() -> None:
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["editor_version"] += 1
         actualizar_ultimo_producto(tabla_actual, indices_actualizados)
         st.success(
             f"Multiplicador {multiplicador_global} aplicado a {len(indices_actualizados)} productos con costo."
         )
+
+    st.subheader("Margen objetivo")
+    with st.form("margen_objetivo"):
+        col_margen, col_boton_margen = st.columns([1, 2])
+        margen_objetivo = col_margen.number_input(
+            "Margen objetivo (%)",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            format="%.2f",
+        )
+        aplicar_margen_objetivo = col_boton_margen.form_submit_button(
+            "Aplicar margen objetivo a todos los productos con costo"
+        )
+
+    if aplicar_margen_objetivo:
+        tabla_actual = st.session_state["tabla_trabajo"].copy()
+        mascara_con_costo = tiene_costo_valido(tabla_actual["Costo"])
+        indices_actualizados = tabla_actual.index[mascara_con_costo].tolist()
+        productos_sin_costo = int((~mascara_con_costo).sum())
+        multiplicador_margen = 1 + margen_objetivo / 100
+        tabla_actual.loc[mascara_con_costo, "Multiplicador"] = multiplicador_margen
+        tabla_actual = recalcular_precios(tabla_actual)
+        st.session_state["tabla_trabajo"] = tabla_actual
+        st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["editor_version"] += 1
+        actualizar_ultimo_producto(tabla_actual, indices_actualizados)
+        st.success(
+            "Margen objetivo aplicado a "
+            f"{len(indices_actualizados)} productos con costo válido. "
+            f"{productos_sin_costo} productos quedaron sin modificar por no tener costo."
+        )
+
+    st.subheader("Restaurar simulación")
+    st.write("Vuelve los multiplicadores a 1 y conserva los costos que hayas editado.")
+    if st.button("Restaurar simulación"):
+        tabla_actual = st.session_state["tabla_trabajo"].copy()
+        tabla_actual["Multiplicador"] = 1.0
+        tabla_actual = recalcular_precios(tabla_actual)
+        st.session_state["tabla_trabajo"] = tabla_actual
+        st.session_state["costos_originales"] = tabla_actual["Costo"].copy()
+        st.session_state["indices_afectados"] = set()
+        st.session_state["ultimo_producto_modificado"] = None
+        st.session_state["editor_version"] += 1
+        st.success("Simulación restaurada. Se mantuvieron los costos editados.")
 
     st.subheader("Multiplicador masivo por marca")
     marcas = sorted(
@@ -452,6 +539,7 @@ def main() -> None:
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["indices_afectados"].update(indices_actualizados)
+        st.session_state["editor_version"] += 1
         actualizar_ultimo_producto(tabla_actual, indices_actualizados)
         st.success(
             f"Multiplicador {multiplicador_masivo} aplicado a {len(indices_actualizados)} productos."
@@ -502,6 +590,7 @@ def main() -> None:
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["indices_afectados"].add(producto_seleccionado)
+        st.session_state["editor_version"] += 1
         actualizar_ultimo_producto(tabla_actual, [producto_seleccionado])
         producto_aplicado = formatear_opcion_producto(
             tabla_actual.loc[producto_seleccionado]
@@ -512,11 +601,8 @@ def main() -> None:
 
     if st.session_state.get("ultimo_producto_modificado") is not None:
         st.subheader("Último producto modificado")
-        st.dataframe(
-            st.session_state["ultimo_producto_modificado"],
-            use_container_width=True,
-            hide_index=True,
-            column_config=config_columnas,
+        mostrar_tabla_revision(
+            st.session_state["ultimo_producto_modificado"], config_columnas
         )
 
     st.subheader("Editor de productos")
@@ -528,7 +614,7 @@ def main() -> None:
     tabla_previa_editor = st.session_state["tabla_trabajo"].copy()
     df_editado = st.data_editor(
         st.session_state["tabla_trabajo"],
-        key="editor_productos",
+        key=f"editor_productos_{st.session_state['editor_version']}",
         use_container_width=True,
         num_rows="fixed",
         disabled=[
@@ -564,12 +650,7 @@ def main() -> None:
     if productos_modificados.empty:
         st.info("Todavía no hay productos modificados.")
     else:
-        st.dataframe(
-            productos_modificados,
-            use_container_width=True,
-            hide_index=True,
-            column_config=config_columnas,
-        )
+        mostrar_tabla_revision(productos_modificados, config_columnas)
 
     st.subheader("Buscar producto en la simulación")
     busqueda_simulacion = st.text_input(
@@ -580,20 +661,10 @@ def main() -> None:
         filtrar_productos(df_calculado, busqueda_simulacion)
     )[COLUMNAS_BUSQUEDA_SIMULACION]
     st.caption(f"Coincidencias: {len(productos_encontrados)}")
-    st.dataframe(
-        productos_encontrados,
-        use_container_width=True,
-        hide_index=True,
-        column_config=config_columnas,
-    )
+    mostrar_tabla_revision(productos_encontrados, config_columnas)
 
     st.subheader("Resultado calculado")
-    st.dataframe(
-        df_calculado,
-        use_container_width=True,
-        hide_index=True,
-        column_config=config_columnas,
-    )
+    mostrar_tabla_revision(df_calculado, config_columnas)
 
     # El dataframe final conserva todas las columnas originales y solo actualiza Precio y Costo.
     df_final = df.copy()
