@@ -214,7 +214,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertFalse(validacion["puede_exportar"])
 
         df_trabajo = preparar_tabla_trabajo(df_original)
-        with self.assertRaisesRegex(ValueError, "Nombre vacío"):
+        with self.assertRaisesRegex(ValueError, "sin ningún Nombre válido asociado"):
             construir_dataframe_exportacion_precios(
                 df_original,
                 recalcular_precios(df_trabajo),
@@ -241,6 +241,87 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
 
         self.assertTrue(df_exportado["Nombre"].str.strip().ne("").all())
         self.assertTrue(df_exportado["Identificador de URL"].str.strip().ne("").all())
+
+    def test_variante_sin_nombre_hereda_el_primer_nombre_del_identificador(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_original.loc[1, "Nombre"] = ""
+        df_sin_modificar = df_original.copy(deep=True)
+        df_trabajo = preparar_tabla_trabajo(df_original)
+
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original,
+            recalcular_precios(df_trabajo),
+            df_trabajo["Costo"].copy(),
+        )
+
+        self.assertEqual(df_exportado.loc[1, "Nombre"], "Remera clásica")
+        self.assertEqual(df_exportado.loc[1, "Identificador de URL"], "remera")
+        pd.testing.assert_frame_equal(df_original, df_sin_modificar)
+
+    def test_variante_sin_nombre_no_bloquea_si_el_identificador_tiene_nombre(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_original.loc[1, "Nombre"] = "  "
+
+        validacion = validar_exportacion_precios(df_original)
+
+        self.assertEqual(validacion["nombres_vacios"], 1)
+        self.assertEqual(validacion["identificadores_sin_nombre_valido"], 0)
+        self.assertTrue(validacion["puede_exportar"])
+
+    def test_bloquea_solo_si_todo_el_identificador_carece_de_nombre(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_original.loc[df_original["Identificador de URL"].eq("remera"), "Nombre"] = ""
+        df_trabajo = preparar_tabla_trabajo(df_original)
+
+        validacion = validar_exportacion_precios(df_original)
+
+        self.assertEqual(validacion["nombres_vacios"], 2)
+        self.assertEqual(validacion["identificadores_sin_nombre_valido"], 1)
+        self.assertFalse(validacion["puede_exportar"])
+        with self.assertRaisesRegex(ValueError, "sin ningún Nombre válido asociado"):
+            construir_dataframe_exportacion_precios(
+                df_original,
+                recalcular_precios(df_trabajo),
+                df_trabajo["Costo"].copy(),
+            )
+
+    def test_csv_minimo_con_variante_sin_nombre_mantiene_columnas_y_actualiza_precio(
+        self,
+    ):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_original.loc[1, "Nombre"] = ""
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[1, "Multiplicador"] = 3
+
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original,
+            recalcular_precios(df_trabajo),
+            costos_originales,
+            {1},
+        )
+
+        self.assertEqual(list(df_exportado.columns), COLUMNAS_EXPORTACION_PRECIOS)
+        self.assertEqual(df_exportado.loc[1, "Precio"], "15,000.00")
+        self.assertEqual(df_exportado.loc[1, "Nombre"], "Remera clásica")
+        for columna in [
+            "Identificador de URL",
+            "Nombre de propiedad 1",
+            "Valor de propiedad 1",
+            "Nombre de propiedad 2",
+            "Valor de propiedad 2",
+            "Nombre de propiedad 3",
+            "Valor de propiedad 3",
+        ]:
+            self.assertEqual(df_exportado.loc[1, columna], df_original.loc[1, columna])
+
+        df_completo = construir_dataframe_exportacion(
+            df_original,
+            recalcular_precios(df_trabajo),
+            costos_originales,
+            {1},
+        )
+        self.assertEqual(df_completo.loc[1, "Nombre"], "")
 
     def test_producto_con_multiplicador_uno_no_afectado_conserva_precio_original(self):
         df_original = self.crear_csv_original()
