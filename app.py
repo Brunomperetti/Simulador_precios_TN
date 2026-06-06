@@ -485,6 +485,28 @@ def calcular_mascara_precios_exportados(
     ) & calcular_mascara_precios_actualizados(df_calculado)
 
 
+def obtener_nombres_principales_por_identificador(
+    df_original: pd.DataFrame,
+) -> dict[str, str]:
+    """Obtiene el primer Nombre no vacío de cada Identificador de URL."""
+    if not {COLUMNA_IDENTIFICADOR_URL, "Nombre"}.issubset(df_original.columns):
+        return {}
+
+    identificadores = df_original[COLUMNA_IDENTIFICADOR_URL].fillna("").astype(str)
+    nombres = df_original["Nombre"].fillna("").astype(str)
+    nombres_validos = nombres.str.strip().ne("")
+    identificadores_validos = identificadores.str.strip().ne("")
+
+    nombres_principales = {}
+    for identificador, nombre in zip(
+        identificadores[nombres_validos & identificadores_validos],
+        nombres[nombres_validos & identificadores_validos],
+    ):
+        nombres_principales.setdefault(identificador, nombre)
+
+    return nombres_principales
+
+
 def validar_exportacion_precios(df_original: pd.DataFrame) -> dict[str, object]:
     """Valida columnas y campos imprescindibles para reimportar precios."""
     columnas_faltantes = [
@@ -499,23 +521,27 @@ def validar_exportacion_precios(df_original: pd.DataFrame) -> dict[str, object]:
         nombres_vacios = pd.Series(True, index=df_original.index)
 
     if COLUMNA_IDENTIFICADOR_URL in df_original.columns:
-        identificadores_vacios = (
-            df_original[COLUMNA_IDENTIFICADOR_URL]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .eq("")
-        )
+        identificadores = df_original[COLUMNA_IDENTIFICADOR_URL].fillna("").astype(str)
+        identificadores_vacios = identificadores.str.strip().eq("")
     else:
+        identificadores = pd.Series("", index=df_original.index)
         identificadores_vacios = pd.Series(True, index=df_original.index)
+
+    nombres_principales = obtener_nombres_principales_por_identificador(df_original)
+    identificadores_sin_nombre_valido = {
+        identificador
+        for identificador in identificadores[~identificadores_vacios]
+        if identificador not in nombres_principales
+    }
 
     return {
         "columnas_faltantes": columnas_faltantes,
         "nombres_vacios": int(nombres_vacios.sum()),
         "identificadores_vacios": int(identificadores_vacios.sum()),
+        "identificadores_sin_nombre_valido": len(identificadores_sin_nombre_valido),
         "filas": int(len(df_original)),
         "puede_exportar": not columnas_faltantes
-        and not bool(nombres_vacios.any())
+        and not identificadores_sin_nombre_valido
         and not bool(identificadores_vacios.any()),
     }
 
@@ -531,14 +557,22 @@ def construir_dataframe_exportacion_precios(
     if validacion["columnas_faltantes"]:
         faltantes = ", ".join(validacion["columnas_faltantes"])
         raise ValueError(f"Faltan columnas requeridas para exportar: {faltantes}.")
-    if validacion["nombres_vacios"]:
-        raise ValueError("No se puede exportar: hay filas con Nombre vacío.")
+    if validacion["identificadores_sin_nombre_valido"]:
+        raise ValueError(
+            "No se puede exportar: hay Identificadores de URL sin ningún "
+            "Nombre válido asociado."
+        )
     if validacion["identificadores_vacios"]:
         raise ValueError(
             "No se puede exportar: hay filas con Identificador de URL vacío."
         )
 
     df_final = df_original.loc[:, COLUMNAS_EXPORTACION_PRECIOS].copy()
+    nombres_principales = obtener_nombres_principales_por_identificador(df_original)
+    nombres_vacios = df_final["Nombre"].fillna("").astype(str).str.strip().eq("")
+    df_final.loc[nombres_vacios, "Nombre"] = df_final.loc[
+        nombres_vacios, COLUMNA_IDENTIFICADOR_URL
+    ].map(nombres_principales)
     mascara_precios_exportados = calcular_mascara_precios_exportados(
         df_calculado, costos_originales, indices_afectados
     )
@@ -1186,10 +1220,20 @@ def main() -> None:
             + ", ".join(validacion_exportacion["columnas_faltantes"])
             + "."
         )
-    if validacion_exportacion["nombres_vacios"]:
+    if (
+        validacion_exportacion["nombres_vacios"]
+        and not validacion_exportacion["identificadores_sin_nombre_valido"]
+    ):
+        st.warning(
+            f"Se detectaron {validacion_exportacion['nombres_vacios']} variantes con "
+            "Nombre vacío. Para el CSV mínimo se completarán automáticamente con "
+            "el nombre del producto principal."
+        )
+    if validacion_exportacion["identificadores_sin_nombre_valido"]:
         st.error(
-            f"Exportación bloqueada: hay {validacion_exportacion['nombres_vacios']} "
-            "filas con Nombre vacío."
+            "Exportación bloqueada: hay "
+            f"{validacion_exportacion['identificadores_sin_nombre_valido']} "
+            "Identificadores de URL sin ningún Nombre válido asociado."
         )
     if validacion_exportacion["identificadores_vacios"]:
         st.error(
