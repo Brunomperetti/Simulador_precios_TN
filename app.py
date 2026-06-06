@@ -9,6 +9,17 @@ import streamlit as st
 # Columnas mínimas que necesita el simulador para trabajar con el CSV de Tienda Nube.
 COLUMNAS_REQUERIDAS = ["Nombre", "Marca", "SKU", "Precio", "Costo"]
 COLUMNA_IDENTIFICADOR_URL = "Identificador de URL"
+COLUMNAS_EXPORTACION_PRECIOS = [
+    "Identificador de URL",
+    "Nombre",
+    "Nombre de propiedad 1",
+    "Valor de propiedad 1",
+    "Nombre de propiedad 2",
+    "Valor de propiedad 2",
+    "Nombre de propiedad 3",
+    "Valor de propiedad 3",
+    "Precio",
+]
 COLUMNAS_VARIANTES = [
     "Identificador de URL",
     "Nombre",
@@ -460,6 +471,84 @@ def formatear_numero_tienda_nube(valor) -> str:
     return f"{float(valor):,.2f}"
 
 
+def calcular_mascara_precios_exportados(
+    df_calculado: pd.DataFrame,
+    costos_originales: pd.Series,
+    indices_afectados: set | None = None,
+) -> pd.Series:
+    """Marca precios que fueron afectados, son válidos y cambian realmente."""
+    if indices_afectados is None:
+        indices_afectados = set()
+
+    return calcular_mascara_modificados(
+        df_calculado, costos_originales, indices_afectados
+    ) & calcular_mascara_precios_actualizados(df_calculado)
+
+
+def validar_exportacion_precios(df_original: pd.DataFrame) -> dict[str, object]:
+    """Valida columnas y campos imprescindibles para reimportar precios."""
+    columnas_faltantes = [
+        columna
+        for columna in COLUMNAS_EXPORTACION_PRECIOS
+        if columna not in df_original.columns
+    ]
+
+    if "Nombre" in df_original.columns:
+        nombres_vacios = df_original["Nombre"].fillna("").astype(str).str.strip().eq("")
+    else:
+        nombres_vacios = pd.Series(True, index=df_original.index)
+
+    if COLUMNA_IDENTIFICADOR_URL in df_original.columns:
+        identificadores_vacios = (
+            df_original[COLUMNA_IDENTIFICADOR_URL]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+        )
+    else:
+        identificadores_vacios = pd.Series(True, index=df_original.index)
+
+    return {
+        "columnas_faltantes": columnas_faltantes,
+        "nombres_vacios": int(nombres_vacios.sum()),
+        "identificadores_vacios": int(identificadores_vacios.sum()),
+        "filas": int(len(df_original)),
+        "puede_exportar": not columnas_faltantes
+        and not bool(nombres_vacios.any())
+        and not bool(identificadores_vacios.any()),
+    }
+
+
+def construir_dataframe_exportacion_precios(
+    df_original: pd.DataFrame,
+    df_calculado: pd.DataFrame,
+    costos_originales: pd.Series,
+    indices_afectados: set | None = None,
+) -> pd.DataFrame:
+    """Construye el CSV mínimo y seguro para actualizar precios en Tienda Nube."""
+    validacion = validar_exportacion_precios(df_original)
+    if validacion["columnas_faltantes"]:
+        faltantes = ", ".join(validacion["columnas_faltantes"])
+        raise ValueError(f"Faltan columnas requeridas para exportar: {faltantes}.")
+    if validacion["nombres_vacios"]:
+        raise ValueError("No se puede exportar: hay filas con Nombre vacío.")
+    if validacion["identificadores_vacios"]:
+        raise ValueError(
+            "No se puede exportar: hay filas con Identificador de URL vacío."
+        )
+
+    df_final = df_original.loc[:, COLUMNAS_EXPORTACION_PRECIOS].copy()
+    mascara_precios_exportados = calcular_mascara_precios_exportados(
+        df_calculado, costos_originales, indices_afectados
+    )
+    nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
+    df_final.loc[mascara_precios_exportados, "Precio"] = nuevos_precios.loc[
+        mascara_precios_exportados
+    ].map(formatear_numero_tienda_nube)
+    return df_final
+
+
 def construir_dataframe_exportacion(
     df_original: pd.DataFrame,
     df_calculado: pd.DataFrame,
@@ -471,12 +560,11 @@ def construir_dataframe_exportacion(
     if indices_afectados is None:
         indices_afectados = set()
 
-    mascara_modificados = calcular_mascara_modificados(
+    mascara_actualizar_precio = calcular_mascara_precios_exportados(
         df_calculado, costos_originales, indices_afectados
     )
     nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
     precios_exportados = df_original["Precio"].copy()
-    mascara_actualizar_precio = mascara_modificados & nuevos_precios.notna()
     precios_exportados.loc[mascara_actualizar_precio] = nuevos_precios.loc[
         mascara_actualizar_precio
     ].map(formatear_numero_tienda_nube)
@@ -572,11 +660,10 @@ def generar_csv_descarga_preservando_original(
     if indices_afectados is None:
         indices_afectados = set()
 
-    mascara_modificados = calcular_mascara_modificados(
+    mascara_actualizar_precio = calcular_mascara_precios_exportados(
         df_calculado, costos_originales, indices_afectados
     )
     nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
-    mascara_actualizar_precio = mascara_modificados & nuevos_precios.notna()
     precios_por_indice = nuevos_precios.loc[mascara_actualizar_precio].map(
         formatear_numero_tienda_nube
     )
@@ -635,6 +722,42 @@ def mostrar_productos_con_variantes(df: pd.DataFrame) -> None:
         "Estas filas no son errores: Tienda Nube usa más de una fila cuando un producto tiene variantes."
     )
     st.dataframe(productos_con_variantes, use_container_width=True, hide_index=True)
+
+
+def detectar_quoting_csv_original(
+    contenido_original: bytes, separador: str, encoding: str | None = None
+) -> int:
+    """Conserva el estilo de comillas global cuando el original cita todos los campos."""
+    encoding_lectura = encoding or detectar_codificacion(contenido_original)
+    primera_linea = contenido_original.decode(encoding_lectura).splitlines()[0]
+    campos = next(csv.reader([primera_linea], delimiter=separador))
+    campos_crudos = obtener_spans_campos_csv(primera_linea, separador)
+    todos_entre_comillas = bool(campos) and all(
+        primera_linea[inicio:fin].strip().startswith('"')
+        and primera_linea[inicio:fin].strip().endswith('"')
+        for inicio, fin in campos_crudos
+    )
+    return csv.QUOTE_ALL if todos_entre_comillas else csv.QUOTE_MINIMAL
+
+
+def generar_csv_descarga_precios(
+    df_final: pd.DataFrame,
+    contenido_original: bytes,
+    separador_original: str,
+    encoding: str | None = "utf-8",
+) -> bytes:
+    """Exporta el CSV mínimo con punto y coma y comillas compatibles con el original."""
+    encoding_exportacion = normalizar_codificacion_exportacion(encoding)
+    quoting = detectar_quoting_csv_original(
+        contenido_original, separador_original, encoding
+    )
+    csv_texto = df_final.to_csv(
+        index=False,
+        sep=";",
+        quoting=quoting,
+        lineterminator="\n",
+    )
+    return csv_texto.encode(encoding_exportacion)
 
 
 def generar_csv_descarga(
@@ -1037,21 +1160,88 @@ def main() -> None:
     mostrar_tabla_revision(resultado_calculado, config_columnas)
 
     st.subheader("Exportar CSV final")
-    mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
-    st.download_button(
-        label="Descargar CSV para Tienda Nube",
-        data=generar_csv_descarga_preservando_original(
-            contenido,
-            df,
-            df_calculado,
-            costos_originales,
-            separador,
-            codificacion,
-            indices_afectados,
-        ),
-        file_name="tienda_nube_precios_actualizados.csv",
-        mime="text/csv",
+    st.info(
+        "Al importar en Tienda Nube, no ignores estas columnas: Identificador de "
+        "URL, Nombre, Nombre/Valor de propiedad 1, 2 y 3, y Precio."
     )
+    mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
+
+    validacion_exportacion = validar_exportacion_precios(df)
+    precios_realmente_modificados = int(
+        calcular_mascara_precios_exportados(
+            df_calculado, costos_originales, indices_afectados
+        ).sum()
+    )
+    metricas_exportacion = st.columns(2)
+    metricas_exportacion[0].metric(
+        "Filas que serán exportadas", validacion_exportacion["filas"]
+    )
+    metricas_exportacion[1].metric(
+        "Precios realmente modificados", precios_realmente_modificados
+    )
+
+    if validacion_exportacion["columnas_faltantes"]:
+        st.error(
+            "No se puede generar el CSV recomendado. Faltan columnas obligatorias: "
+            + ", ".join(validacion_exportacion["columnas_faltantes"])
+            + "."
+        )
+    if validacion_exportacion["nombres_vacios"]:
+        st.error(
+            f"Exportación bloqueada: hay {validacion_exportacion['nombres_vacios']} "
+            "filas con Nombre vacío."
+        )
+    if validacion_exportacion["identificadores_vacios"]:
+        st.error(
+            "⚠️ Advertencia crítica: hay "
+            f"{validacion_exportacion['identificadores_vacios']} filas con "
+            "Identificador de URL vacío. La exportación fue bloqueada para evitar "
+            "errores de importación."
+        )
+
+    puede_exportar = bool(validacion_exportacion["puede_exportar"])
+    columnas_descarga = st.columns(2)
+    with columnas_descarga[0]:
+        st.download_button(
+            label="Descargar CSV completo para Tienda Nube",
+            data=generar_csv_descarga_preservando_original(
+                contenido,
+                df,
+                df_calculado,
+                costos_originales,
+                separador,
+                codificacion,
+                indices_afectados,
+            ),
+            file_name="tienda_nube_precios_actualizados.csv",
+            mime="text/csv",
+            disabled=not puede_exportar,
+            use_container_width=True,
+        )
+    with columnas_descarga[1]:
+        df_exportacion_precios = (
+            construir_dataframe_exportacion_precios(
+                df, df_calculado, costos_originales, indices_afectados
+            )
+            if puede_exportar
+            else pd.DataFrame(columns=COLUMNAS_EXPORTACION_PRECIOS)
+        )
+        st.download_button(
+            label="Descargar CSV solo actualización de precios",
+            data=(
+                generar_csv_descarga_precios(
+                    df_exportacion_precios, contenido, separador, codificacion
+                )
+                if puede_exportar
+                else b""
+            ),
+            file_name="tienda_nube_solo_actualizacion_precios.csv",
+            mime="text/csv",
+            type="primary",
+            disabled=not puede_exportar,
+            use_container_width=True,
+        )
+        st.caption("Recomendado para actualizar precios de forma segura.")
 
 
 if __name__ == "__main__":
