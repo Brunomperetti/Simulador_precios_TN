@@ -8,8 +8,8 @@ App local/online hecha con Streamlit para:
 - Aplicar reglas masivas por marca.
 - Calcular nuevo precio.
 - Descargar el CSV completo listo para volver a importar en Tienda Nube.
-- Descargar un CSV mínimo recomendado para actualizar precios, conservando identificador, nombre y propiedades de variantes.
-- Validar nombres, identificadores y cantidad de precios realmente modificados antes de exportar.
+- Descargar una actualización de precios que conserva exactamente las columnas, el orden y las filas del CSV original.
+- Modificar únicamente la columna `Precio` en las filas afectadas.
 
 ## Ejecutar localmente
 
