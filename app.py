@@ -9,17 +9,6 @@ import streamlit as st
 # Columnas mínimas que necesita el simulador para trabajar con el CSV de Tienda Nube.
 COLUMNAS_REQUERIDAS = ["Nombre", "Marca", "SKU", "Precio", "Costo"]
 COLUMNA_IDENTIFICADOR_URL = "Identificador de URL"
-COLUMNAS_EXPORTACION_PRECIOS = [
-    "Identificador de URL",
-    "Nombre",
-    "Nombre de propiedad 1",
-    "Valor de propiedad 1",
-    "Nombre de propiedad 2",
-    "Valor de propiedad 2",
-    "Nombre de propiedad 3",
-    "Valor de propiedad 3",
-    "Precio",
-]
 COLUMNAS_VARIANTES = [
     "Identificador de URL",
     "Nombre",
@@ -485,102 +474,16 @@ def calcular_mascara_precios_exportados(
     ) & calcular_mascara_precios_actualizados(df_calculado)
 
 
-def obtener_nombres_principales_por_identificador(
-    df_original: pd.DataFrame,
-) -> dict[str, str]:
-    """Obtiene el primer Nombre no vacío de cada Identificador de URL."""
-    if not {COLUMNA_IDENTIFICADOR_URL, "Nombre"}.issubset(df_original.columns):
-        return {}
-
-    identificadores = df_original[COLUMNA_IDENTIFICADOR_URL].fillna("").astype(str)
-    nombres = df_original["Nombre"].fillna("").astype(str)
-    nombres_validos = nombres.str.strip().ne("")
-    identificadores_validos = identificadores.str.strip().ne("")
-
-    nombres_principales = {}
-    for identificador, nombre in zip(
-        identificadores[nombres_validos & identificadores_validos],
-        nombres[nombres_validos & identificadores_validos],
-    ):
-        nombres_principales.setdefault(identificador, nombre)
-
-    return nombres_principales
-
-
-def validar_exportacion_precios(df_original: pd.DataFrame) -> dict[str, object]:
-    """Valida columnas y campos imprescindibles para reimportar precios."""
-    columnas_faltantes = [
-        columna
-        for columna in COLUMNAS_EXPORTACION_PRECIOS
-        if columna not in df_original.columns
-    ]
-
-    if "Nombre" in df_original.columns:
-        nombres_vacios = df_original["Nombre"].fillna("").astype(str).str.strip().eq("")
-    else:
-        nombres_vacios = pd.Series(True, index=df_original.index)
-
-    if COLUMNA_IDENTIFICADOR_URL in df_original.columns:
-        identificadores = df_original[COLUMNA_IDENTIFICADOR_URL].fillna("").astype(str)
-        identificadores_vacios = identificadores.str.strip().eq("")
-    else:
-        identificadores = pd.Series("", index=df_original.index)
-        identificadores_vacios = pd.Series(True, index=df_original.index)
-
-    nombres_principales = obtener_nombres_principales_por_identificador(df_original)
-    identificadores_sin_nombre_valido = {
-        identificador
-        for identificador in identificadores[~identificadores_vacios]
-        if identificador not in nombres_principales
-    }
-
-    return {
-        "columnas_faltantes": columnas_faltantes,
-        "nombres_vacios": int(nombres_vacios.sum()),
-        "identificadores_vacios": int(identificadores_vacios.sum()),
-        "identificadores_sin_nombre_valido": len(identificadores_sin_nombre_valido),
-        "filas": int(len(df_original)),
-        "puede_exportar": not columnas_faltantes
-        and not identificadores_sin_nombre_valido
-        and not bool(identificadores_vacios.any()),
-    }
-
-
 def construir_dataframe_exportacion_precios(
     df_original: pd.DataFrame,
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
 ) -> pd.DataFrame:
-    """Construye el CSV mínimo y seguro para actualizar precios en Tienda Nube."""
-    validacion = validar_exportacion_precios(df_original)
-    if validacion["columnas_faltantes"]:
-        faltantes = ", ".join(validacion["columnas_faltantes"])
-        raise ValueError(f"Faltan columnas requeridas para exportar: {faltantes}.")
-    if validacion["identificadores_sin_nombre_valido"]:
-        raise ValueError(
-            "No se puede exportar: hay Identificadores de URL sin ningún "
-            "Nombre válido asociado."
-        )
-    if validacion["identificadores_vacios"]:
-        raise ValueError(
-            "No se puede exportar: hay filas con Identificador de URL vacío."
-        )
-
-    df_final = df_original.loc[:, COLUMNAS_EXPORTACION_PRECIOS].copy()
-    nombres_principales = obtener_nombres_principales_por_identificador(df_original)
-    nombres_vacios = df_final["Nombre"].fillna("").astype(str).str.strip().eq("")
-    df_final.loc[nombres_vacios, "Nombre"] = df_final.loc[
-        nombres_vacios, COLUMNA_IDENTIFICADOR_URL
-    ].map(nombres_principales)
-    mascara_precios_exportados = calcular_mascara_precios_exportados(
-        df_calculado, costos_originales, indices_afectados
+    """Conserva el dataframe original y modifica únicamente los precios afectados."""
+    return construir_dataframe_exportacion(
+        df_original, df_calculado, costos_originales, indices_afectados
     )
-    nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
-    df_final.loc[mascara_precios_exportados, "Precio"] = nuevos_precios.loc[
-        mascara_precios_exportados
-    ].map(formatear_numero_tienda_nube)
-    return df_final
 
 
 def construir_dataframe_exportacion(
@@ -775,23 +678,24 @@ def detectar_quoting_csv_original(
 
 
 def generar_csv_descarga_precios(
-    df_final: pd.DataFrame,
     contenido_original: bytes,
+    df_original: pd.DataFrame,
+    df_calculado: pd.DataFrame,
+    costos_originales: pd.Series,
     separador_original: str,
-    encoding: str | None = "utf-8",
+    encoding: str | None = None,
+    indices_afectados: set | None = None,
 ) -> bytes:
-    """Exporta el CSV mínimo con punto y coma y comillas compatibles con el original."""
-    encoding_exportacion = normalizar_codificacion_exportacion(encoding)
-    quoting = detectar_quoting_csv_original(
-        contenido_original, separador_original, encoding
+    """Exporta el CSV original completo cambiando únicamente precios afectados."""
+    return generar_csv_descarga_preservando_original(
+        contenido_original,
+        df_original,
+        df_calculado,
+        costos_originales,
+        separador_original,
+        encoding,
+        indices_afectados,
     )
-    csv_texto = df_final.to_csv(
-        index=False,
-        sep=";",
-        quoting=quoting,
-        lineterminator="\n",
-    )
-    return csv_texto.encode(encoding_exportacion)
 
 
 def generar_csv_descarga(
@@ -1200,92 +1104,48 @@ def main() -> None:
     )
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
 
-    validacion_exportacion = validar_exportacion_precios(df)
     precios_realmente_modificados = int(
         calcular_mascara_precios_exportados(
             df_calculado, costos_originales, indices_afectados
         ).sum()
     )
     metricas_exportacion = st.columns(2)
-    metricas_exportacion[0].metric(
-        "Filas que serán exportadas", validacion_exportacion["filas"]
-    )
+    metricas_exportacion[0].metric("Filas que serán exportadas", len(df))
     metricas_exportacion[1].metric(
         "Precios realmente modificados", precios_realmente_modificados
     )
 
-    if validacion_exportacion["columnas_faltantes"]:
-        st.error(
-            "No se puede generar el CSV recomendado. Faltan columnas obligatorias: "
-            + ", ".join(validacion_exportacion["columnas_faltantes"])
-            + "."
-        )
-    if (
-        validacion_exportacion["nombres_vacios"]
-        and not validacion_exportacion["identificadores_sin_nombre_valido"]
-    ):
-        st.warning(
-            f"Se detectaron {validacion_exportacion['nombres_vacios']} variantes con "
-            "Nombre vacío. Para el CSV mínimo se completarán automáticamente con "
-            "el nombre del producto principal."
-        )
-    if validacion_exportacion["identificadores_sin_nombre_valido"]:
-        st.error(
-            "Exportación bloqueada: hay "
-            f"{validacion_exportacion['identificadores_sin_nombre_valido']} "
-            "Identificadores de URL sin ningún Nombre válido asociado."
-        )
-    if validacion_exportacion["identificadores_vacios"]:
-        st.error(
-            "⚠️ Advertencia crítica: hay "
-            f"{validacion_exportacion['identificadores_vacios']} filas con "
-            "Identificador de URL vacío. La exportación fue bloqueada para evitar "
-            "errores de importación."
-        )
-
-    puede_exportar = bool(validacion_exportacion["puede_exportar"])
+    csv_precios_actualizados = generar_csv_descarga_precios(
+        contenido,
+        df,
+        df_calculado,
+        costos_originales,
+        separador,
+        codificacion,
+        indices_afectados,
+    )
     columnas_descarga = st.columns(2)
     with columnas_descarga[0]:
         st.download_button(
             label="Descargar CSV completo para Tienda Nube",
-            data=generar_csv_descarga_preservando_original(
-                contenido,
-                df,
-                df_calculado,
-                costos_originales,
-                separador,
-                codificacion,
-                indices_afectados,
-            ),
+            data=csv_precios_actualizados,
             file_name="tienda_nube_precios_actualizados.csv",
             mime="text/csv",
-            disabled=not puede_exportar,
             use_container_width=True,
         )
     with columnas_descarga[1]:
-        df_exportacion_precios = (
-            construir_dataframe_exportacion_precios(
-                df, df_calculado, costos_originales, indices_afectados
-            )
-            if puede_exportar
-            else pd.DataFrame(columns=COLUMNAS_EXPORTACION_PRECIOS)
-        )
         st.download_button(
             label="Descargar CSV solo actualización de precios",
-            data=(
-                generar_csv_descarga_precios(
-                    df_exportacion_precios, contenido, separador, codificacion
-                )
-                if puede_exportar
-                else b""
-            ),
+            data=csv_precios_actualizados,
             file_name="tienda_nube_solo_actualizacion_precios.csv",
             mime="text/csv",
             type="primary",
-            disabled=not puede_exportar,
             use_container_width=True,
         )
-        st.caption("Recomendado para actualizar precios de forma segura.")
+        st.caption(
+            "Conserva exactamente las columnas, el orden y las filas del CSV original; "
+            "solo cambia Precio en las filas afectadas."
+        )
 
 
 if __name__ == "__main__":
