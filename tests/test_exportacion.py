@@ -5,17 +5,21 @@ from io import StringIO
 import pandas as pd
 
 from app import (
+    COLUMNAS_EXPORTACION_PRECIOS,
     calcular_mascara_precios_actualizados,
     calcular_resumen_aplicacion,
     construir_dataframe_exportacion,
+    construir_dataframe_exportacion_precios,
     construir_mensaje_aplicacion,
     detectar_codificacion,
     generar_csv_descarga,
+    generar_csv_descarga_precios,
     generar_csv_descarga_preservando_original,
     obtener_metricas_csv,
     obtener_productos_con_variantes,
     preparar_tabla_trabajo,
     recalcular_precios,
+    validar_exportacion_precios,
 )
 
 
@@ -63,6 +67,180 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             ],
             columns=columnas,
         )
+
+    def crear_csv_original_con_propiedades(self):
+        return pd.DataFrame(
+            [
+                [
+                    "remera",
+                    "Remera clásica",
+                    "Marca 1",
+                    "REM-M",
+                    "Talle",
+                    "M",
+                    "Color",
+                    "Azul",
+                    "",
+                    "",
+                    "10,000.00",
+                    "5,000.00",
+                    "dato auxiliar",
+                ],
+                [
+                    "remera",
+                    "Remera clásica",
+                    "Marca 1",
+                    "REM-L",
+                    "Talle",
+                    "L",
+                    "Color",
+                    "Rojo",
+                    "",
+                    "",
+                    "10,000.00",
+                    "5,000.00",
+                    "otro dato",
+                ],
+                [
+                    "gorra",
+                    "Gorra",
+                    "Marca 2",
+                    "GOR-1",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "8,000.00",
+                    "",
+                    "sin costo",
+                ],
+            ],
+            columns=[
+                "Identificador de URL",
+                "Nombre",
+                "Marca",
+                "SKU",
+                "Nombre de propiedad 1",
+                "Valor de propiedad 1",
+                "Nombre de propiedad 2",
+                "Valor de propiedad 2",
+                "Nombre de propiedad 3",
+                "Valor de propiedad 3",
+                "Precio",
+                "Costo",
+                "Columna auxiliar",
+            ],
+        )
+
+    def test_csv_minimo_contiene_exactamente_columnas_requeridas_y_punto_y_coma(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_calculado = recalcular_precios(df_trabajo)
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original, df_calculado, costos_originales
+        )
+        contenido_original = df_original.to_csv(
+            index=False, sep=";", quoting=csv.QUOTE_ALL
+        ).encode("utf-8")
+        csv_exportado = generar_csv_descarga_precios(
+            df_exportado, contenido_original, ";", "utf-8"
+        )
+        encabezado = csv_exportado.decode("utf-8").splitlines()[0]
+        df_releido = pd.read_csv(
+            StringIO(csv_exportado.decode("utf-8")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+
+        self.assertEqual(list(df_exportado.columns), COLUMNAS_EXPORTACION_PRECIOS)
+        self.assertEqual(list(df_releido.columns), COLUMNAS_EXPORTACION_PRECIOS)
+        self.assertNotIn("Columna auxiliar", df_releido.columns)
+        self.assertEqual(encabezado.count(";"), len(COLUMNAS_EXPORTACION_PRECIOS) - 1)
+        self.assertTrue(encabezado.startswith('"Identificador de URL";"Nombre"'))
+
+    def test_csv_minimo_cambia_precio_modificado_y_conserva_los_demas(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_trabajo.loc[0, "Multiplicador"] = 4.030814
+        df_trabajo.loc[2, "Multiplicador"] = 3
+        df_calculado = recalcular_precios(df_trabajo)
+
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original, df_calculado, costos_originales, {0, 2}
+        )
+
+        self.assertEqual(df_exportado.loc[0, "Precio"], "20,154.07")
+        self.assertEqual(df_exportado.loc[1, "Precio"], "10,000.00")
+        self.assertEqual(df_exportado.loc[2, "Precio"], "8,000.00")
+
+    def test_csv_minimo_conserva_nombre_y_propiedades_de_variantes(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        df_calculado = recalcular_precios(df_trabajo)
+
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original, df_calculado, costos_originales
+        )
+
+        columnas_variante = [
+            "Nombre",
+            "Nombre de propiedad 1",
+            "Valor de propiedad 1",
+            "Nombre de propiedad 2",
+            "Valor de propiedad 2",
+            "Nombre de propiedad 3",
+            "Valor de propiedad 3",
+        ]
+        pd.testing.assert_frame_equal(
+            df_exportado.loc[:, columnas_variante],
+            df_original.loc[:, columnas_variante],
+        )
+
+    def test_validacion_bloquea_nombre_o_identificador_vacios(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_original.loc[0, "Nombre"] = "  "
+        df_original.loc[1, "Identificador de URL"] = ""
+
+        validacion = validar_exportacion_precios(df_original)
+
+        self.assertEqual(validacion["nombres_vacios"], 1)
+        self.assertEqual(validacion["identificadores_vacios"], 1)
+        self.assertFalse(validacion["puede_exportar"])
+
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        with self.assertRaisesRegex(ValueError, "Nombre vacío"):
+            construir_dataframe_exportacion_precios(
+                df_original,
+                recalcular_precios(df_trabajo),
+                df_trabajo["Costo"].copy(),
+            )
+
+        df_original.loc[0, "Nombre"] = "Remera clásica"
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        with self.assertRaisesRegex(ValueError, "Identificador de URL vacío"):
+            construir_dataframe_exportacion_precios(
+                df_original,
+                recalcular_precios(df_trabajo),
+                df_trabajo["Costo"].copy(),
+            )
+
+    def test_csv_minimo_valido_no_contiene_nombre_ni_identificador_vacios(self):
+        df_original = self.crear_csv_original_con_propiedades()
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        df_exportado = construir_dataframe_exportacion_precios(
+            df_original,
+            recalcular_precios(df_trabajo),
+            df_trabajo["Costo"].copy(),
+        )
+
+        self.assertTrue(df_exportado["Nombre"].str.strip().ne("").all())
+        self.assertTrue(df_exportado["Identificador de URL"].str.strip().ne("").all())
 
     def test_producto_con_multiplicador_uno_no_afectado_conserva_precio_original(self):
         df_original = self.crear_csv_original()
