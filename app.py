@@ -480,7 +480,7 @@ def construir_dataframe_exportacion_precios(
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
 ) -> pd.DataFrame:
-    """Conserva el dataframe original y modifica únicamente los precios afectados."""
+    """Conserva el dataframe original y modifica Precio y Costo afectados."""
     return construir_dataframe_exportacion(
         df_original, df_calculado, costos_originales, indices_afectados
     )
@@ -492,7 +492,7 @@ def construir_dataframe_exportacion(
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
 ) -> pd.DataFrame:
-    """Conserva columnas originales y actualiza solo Precio para compatibilidad."""
+    """Conserva columnas originales y actualiza Precio y Costo modificados."""
     df_final = df_original.copy()
     if indices_afectados is None:
         indices_afectados = set()
@@ -500,12 +500,23 @@ def construir_dataframe_exportacion(
     mascara_actualizar_precio = calcular_mascara_precios_exportados(
         df_calculado, costos_originales, indices_afectados
     )
+    mascara_actualizar_costo = series_diferentes(
+        df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
+    )
+
     nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
     precios_exportados = df_original["Precio"].copy()
     precios_exportados.loc[mascara_actualizar_precio] = nuevos_precios.loc[
         mascara_actualizar_precio
     ].map(formatear_numero_tienda_nube)
     df_final["Precio"] = precios_exportados
+
+    nuevos_costos = pd.to_numeric(df_calculado["Costo"], errors="coerce")
+    costos_exportados = df_original["Costo"].copy()
+    costos_exportados.loc[mascara_actualizar_costo] = nuevos_costos.loc[
+        mascara_actualizar_costo
+    ].map(formatear_numero_tienda_nube)
+    df_final["Costo"] = costos_exportados
 
     return df_final
 
@@ -581,7 +592,7 @@ def generar_csv_descarga_preservando_original(
     indices_afectados: set | None = None,
 ) -> bytes:
     """
-    Exporta usando el CSV subido como base y cambia solamente Precio en filas modificadas.
+    Exporta usando el CSV subido como base y cambia Precio y Costo en filas modificadas.
 
     A diferencia de pandas.to_csv, esta función conserva encabezado, columnas, comillas,
     orden, separador, saltos de línea y filas no modificadas byte a byte siempre que la
@@ -594,30 +605,43 @@ def generar_csv_descarga_preservando_original(
         return contenido_original
 
     indice_precio = list(df_original.columns).index("Precio")
+    indice_costo = list(df_original.columns).index("Costo")
     if indices_afectados is None:
         indices_afectados = set()
 
     mascara_actualizar_precio = calcular_mascara_precios_exportados(
         df_calculado, costos_originales, indices_afectados
     )
+    mascara_actualizar_costo = series_diferentes(
+        df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
+    )
     nuevos_precios = pd.to_numeric(df_calculado["Nuevo Precio"], errors="coerce")
     precios_por_indice = nuevos_precios.loc[mascara_actualizar_precio].map(
+        formatear_numero_tienda_nube
+    )
+    nuevos_costos = pd.to_numeric(df_calculado["Costo"], errors="coerce")
+    costos_por_indice = nuevos_costos.loc[mascara_actualizar_costo].map(
         formatear_numero_tienda_nube
     )
 
     lineas_exportadas = lineas.copy()
     for posicion, indice_df in enumerate(df_original.index, start=1):
-        if (
-            posicion >= len(lineas_exportadas)
-            or indice_df not in precios_por_indice.index
-        ):
+        if posicion >= len(lineas_exportadas):
             continue
-        lineas_exportadas[posicion] = reemplazar_campo_csv_preservando_linea(
-            lineas_exportadas[posicion],
-            separador,
-            indice_precio,
-            precios_por_indice.loc[indice_df],
-        )
+        if indice_df in precios_por_indice.index:
+            lineas_exportadas[posicion] = reemplazar_campo_csv_preservando_linea(
+                lineas_exportadas[posicion],
+                separador,
+                indice_precio,
+                precios_por_indice.loc[indice_df],
+            )
+        if indice_df in costos_por_indice.index:
+            lineas_exportadas[posicion] = reemplazar_campo_csv_preservando_linea(
+                lineas_exportadas[posicion],
+                separador,
+                indice_costo,
+                costos_por_indice.loc[indice_df],
+            )
 
     return "".join(lineas_exportadas).encode(encoding_lectura)
 
@@ -686,7 +710,7 @@ def generar_csv_descarga_precios(
     encoding: str | None = None,
     indices_afectados: set | None = None,
 ) -> bytes:
-    """Exporta el CSV original completo cambiando únicamente precios afectados."""
+    """Exporta el CSV original completo cambiando Precio y Costo afectados."""
     return generar_csv_descarga_preservando_original(
         contenido_original,
         df_original,
@@ -1100,7 +1124,7 @@ def main() -> None:
     st.subheader("Exportar CSV final")
     st.info(
         "Al importar en Tienda Nube, no ignores estas columnas: Identificador de "
-        "URL, Nombre, Nombre/Valor de propiedad 1, 2 y 3, y Precio."
+        "URL, Nombre, Nombre/Valor de propiedad 1, 2 y 3, Precio y Costo."
     )
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
 
@@ -1144,7 +1168,7 @@ def main() -> None:
         )
         st.caption(
             "Conserva exactamente las columnas, el orden y las filas del CSV original; "
-            "solo cambia Precio en las filas afectadas."
+            "solo cambia Precio y Costo en las filas afectadas."
         )
 
 
