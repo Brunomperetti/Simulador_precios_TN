@@ -132,6 +132,148 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
             ],
         )
 
+    def crear_caso_regresion_sku_273700(self, precio="10,346.00"):
+        columnas = [
+            "Identificador de URL",
+            "Nombre",
+            "Marca",
+            "SKU",
+            "Precio",
+            "Costo",
+            "Stock",
+            "Descripción",
+        ]
+        filas = [
+            [
+                "producto-sin-cambios",
+                "Producto sin cambios",
+                "Marca Ñ",
+                "111111",
+                "1,500.00",
+                "750.00",
+                "4",
+                "Conservar; exactamente",
+            ],
+            [
+                "producto-273700",
+                "Producto representativo",
+                "Marca Ñ",
+                "273700",
+                precio,
+                "8,280.00",
+                "7",
+                "Texto, comas y Ñ intactos",
+            ],
+            [
+                "producto-final",
+                "Producto final",
+                "Otra marca",
+                "999999",
+                "2,000.00",
+                "1,000.00",
+                "0",
+                "Última fila intacta",
+            ],
+        ]
+        contenido_original = StringIO()
+        escritor = csv.writer(
+            contenido_original,
+            delimiter=";",
+            quoting=csv.QUOTE_ALL,
+            lineterminator="\r\n",
+        )
+        escritor.writerow(columnas)
+        escritor.writerows(filas)
+        contenido_original = contenido_original.getvalue().encode("latin1")
+        df_original = pd.read_csv(
+            StringIO(contenido_original.decode("latin1")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+        return contenido_original, df_original
+
+    def exportar_caso_regresion_sku_273700(
+        self, *, precio="10,346.00", costo_editado=None, multiplicador=1
+    ):
+        contenido_original, df_original = self.crear_caso_regresion_sku_273700(
+            precio
+        )
+        df_trabajo = preparar_tabla_trabajo(df_original)
+        costos_originales = df_trabajo["Costo"].copy()
+        if costo_editado is not None:
+            df_trabajo.loc[1, "Costo"] = costo_editado
+        df_trabajo.loc[1, "Multiplicador"] = multiplicador
+        df_calculado = recalcular_precios(df_trabajo)
+        contenido_exportado = generar_csv_descarga_preservando_original(
+            contenido_original,
+            df_original,
+            df_calculado,
+            costos_originales,
+            ";",
+            "latin1",
+            {1},
+        )
+        df_exportado = pd.read_csv(
+            StringIO(contenido_exportado.decode("latin1")),
+            sep=";",
+            dtype=str,
+            keep_default_na=False,
+        )
+        return contenido_original, contenido_exportado, df_original, df_exportado
+
+    def test_exportacion_sku_273700_modificando_solo_costo_exporta_nuevo_costo(self):
+        _, _, _, df_exportado = self.exportar_caso_regresion_sku_273700(
+            costo_editado=10346
+        )
+
+        self.assertEqual(df_exportado.loc[1, "SKU"], "273700")
+        self.assertEqual(df_exportado.loc[1, "Costo"], "10,346.00")
+        self.assertEqual(df_exportado.loc[1, "Precio"], "10,346.00")
+
+    def test_exportacion_sku_273700_modificando_solo_precio_exporta_nuevo_precio(self):
+        _, _, _, df_exportado = self.exportar_caso_regresion_sku_273700(
+            precio="8,280.00", multiplicador=1.25
+        )
+
+        self.assertEqual(df_exportado.loc[1, "SKU"], "273700")
+        self.assertEqual(df_exportado.loc[1, "Precio"], "10,350.00")
+        self.assertEqual(df_exportado.loc[1, "Costo"], "8,280.00")
+
+    def test_exportacion_sku_273700_modificando_precio_y_costo_exporta_ambos(self):
+        _, _, _, df_exportado = self.exportar_caso_regresion_sku_273700(
+            precio="8,280.00", costo_editado=10346
+        )
+
+        self.assertEqual(df_exportado.loc[1, "SKU"], "273700")
+        self.assertEqual(df_exportado.loc[1, "Precio"], "10,346.00")
+        self.assertEqual(df_exportado.loc[1, "Costo"], "10,346.00")
+
+    def test_exportacion_preservada_mantiene_otras_columnas_y_filas_intactas(self):
+        contenido_original, contenido_exportado, df_original, df_exportado = (
+            self.exportar_caso_regresion_sku_273700(
+                precio="8,280.00", costo_editado=10346
+            )
+        )
+        lineas_originales = contenido_original.splitlines(keepends=True)
+        lineas_exportadas = contenido_exportado.splitlines(keepends=True)
+        columnas_intactas = [
+            columna
+            for columna in df_original.columns
+            if columna not in {"Precio", "Costo"}
+        ]
+
+        self.assertEqual(
+            df_exportado.loc[1, columnas_intactas].tolist(),
+            df_original.loc[1, columnas_intactas].tolist(),
+        )
+        self.assertEqual(lineas_exportadas[0], lineas_originales[0])
+        self.assertEqual(lineas_exportadas[1], lineas_originales[1])
+        self.assertEqual(lineas_exportadas[3], lineas_originales[3])
+        self.assertEqual(len(lineas_exportadas), len(lineas_originales))
+        self.assertEqual(list(df_exportado.columns), list(df_original.columns))
+        self.assertEqual(df_exportado.shape, df_original.shape)
+
     def test_exportacion_precios_preserva_csv_original_excepto_precios_modificados(self):
         df_base = self.crear_csv_original_con_propiedades()
         df_base.loc[1, "Nombre"] = ""
@@ -359,7 +501,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertNotIn("Multiplicador", df_releido.columns)
         self.assertEqual(df_releido.loc[1, "Precio"], "17,525.28")
         self.assertEqual(df_releido.loc[1, "Costo"], "8,762.64")
-        self.assertEqual(df_releido.loc[2, "Costo"], "8,762.64")
+        self.assertEqual(df_releido.loc[2, "Costo"], "9,000.00")
 
     def test_csv_exportado_imita_formato_tienda_nube_sin_bom_y_con_quote_minimal(self):
         columnas = [
@@ -576,7 +718,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(df_releido.shape, (394, 30))
         self.assertEqual(list(df_releido.columns), columnas)
 
-    def test_exportacion_preserva_original_y_cambia_solo_precio(self):
+    def test_exportacion_preserva_original_y_cambia_solo_campos_modificados(self):
         columnas = [
             "Identificador de URL",
             "Nombre",

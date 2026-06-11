@@ -9,7 +9,7 @@ App local/online hecha con Streamlit para:
 - Calcular nuevo precio.
 - Descargar el CSV completo listo para volver a importar en Tienda Nube.
 - Descargar una actualización de precios que conserva exactamente las columnas, el orden y las filas del CSV original.
-- Modificar únicamente la columna `Precio` en las filas afectadas.
+- Modificar únicamente las columnas `Precio` y `Costo` en las filas afectadas.
 
 ## Ejecutar localmente
 
