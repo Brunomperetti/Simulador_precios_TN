@@ -1,6 +1,8 @@
 import csv
 import hashlib
-from io import StringIO
+from datetime import date
+from io import BytesIO, StringIO
+from pathlib import Path
 from numbers import Real
 
 import pandas as pd
@@ -43,6 +45,19 @@ REFERENCIA_ESTADOS = (
     "⚪ Sin modificar / sin cambios"
 )
 LIMITE_VISTA_PREVIA = 50
+COLUMNAS_LISTA_PRECIOS = [
+    "Nombre",
+    "Marca",
+    "SKU",
+    "Costo",
+    "Precio Minorista",
+    "Precio Mayorista",
+]
+PIE_PDF_LISTA_PRECIOS = (
+    "Precios sin IVA. Consultar por volúmenes superiores a $1.000.000. "
+    "Forma de pago: transferencia o efectivo. Transporte a cargo del comprador."
+)
+LOGO_KIKI_PREDETERMINADO = Path("assets/logo_kiki.png")
 
 
 def detectar_separador(contenido: bytes) -> str:
@@ -737,6 +752,421 @@ def generar_csv_descarga(
     return csv_texto.encode(encoding_exportacion)
 
 
+def preparar_tabla_listas_precios(df_original: pd.DataFrame) -> pd.DataFrame:
+    """Crea una copia independiente para listas de precios sin tocar la simulación."""
+    df_listas = df_original[["Nombre", "Marca", "SKU", "Costo"]].copy()
+    df_listas["Costo"] = pd.to_numeric(
+        df_listas["Costo"].map(normalizar_numero), errors="coerce"
+    )
+    return df_listas
+
+
+def calcular_listas_precios(
+    df_listas: pd.DataFrame,
+    multiplicador_minorista: float,
+    multiplicador_mayorista: float,
+    multiplicadores_por_marca: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
+    """Calcula precios minoristas y mayoristas usando overrides opcionales por marca."""
+    df_calculado = df_listas.copy()
+    multiplicadores_por_marca = multiplicadores_por_marca or {}
+    df_calculado["Costo"] = pd.to_numeric(
+        df_calculado["Costo"].map(normalizar_numero), errors="coerce"
+    )
+    df_calculado["Multiplicador Minorista"] = float(multiplicador_minorista)
+    df_calculado["Multiplicador Mayorista"] = float(multiplicador_mayorista)
+
+    for marca, multiplicadores in multiplicadores_por_marca.items():
+        mascara_marca = df_calculado["Marca"].astype(str) == str(marca)
+        if "minorista" in multiplicadores:
+            df_calculado.loc[mascara_marca, "Multiplicador Minorista"] = float(
+                multiplicadores["minorista"]
+            )
+        if "mayorista" in multiplicadores:
+            df_calculado.loc[mascara_marca, "Multiplicador Mayorista"] = float(
+                multiplicadores["mayorista"]
+            )
+
+    mascara_costo = tiene_costo_valido(df_calculado["Costo"])
+    df_calculado["Precio Minorista"] = pd.NA
+    df_calculado["Precio Mayorista"] = pd.NA
+    df_calculado.loc[mascara_costo, "Precio Minorista"] = (
+        df_calculado.loc[mascara_costo, "Costo"]
+        * df_calculado.loc[mascara_costo, "Multiplicador Minorista"]
+    )
+    df_calculado.loc[mascara_costo, "Precio Mayorista"] = (
+        df_calculado.loc[mascara_costo, "Costo"]
+        * df_calculado.loc[mascara_costo, "Multiplicador Mayorista"]
+    )
+
+    return df_calculado
+
+
+def filtrar_lista_para_pdf(
+    df_listas_calculado: pd.DataFrame, marca: str | None
+) -> pd.DataFrame:
+    """Filtra por marca cuando corresponde y quita productos sin costo válido."""
+    df_pdf = df_listas_calculado.copy()
+    if marca and marca != "Todas las marcas":
+        df_pdf = df_pdf[df_pdf["Marca"].astype(str) == str(marca)]
+    return df_pdf[tiene_costo_valido(df_pdf["Costo"])]
+
+
+def formatear_moneda_pdf(valor) -> str:
+    """Formatea precios para mostrar en los PDFs."""
+    if pd.isna(valor):
+        return ""
+    return f"$ {float(valor):,.2f}"
+
+
+def generar_pdf_lista_precios(
+    df_listas_calculado: pd.DataFrame,
+    tipo_lista: str,
+    pie_pdf: str,
+    marca: str | None = None,
+    logo_path: Path | str = LOGO_KIKI_PREDETERMINADO,
+    fecha_generacion: date | None = None,
+) -> bytes:
+    """Genera un PDF de lista de precios minorista o mayorista."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        Image,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    tipo_normalizado = tipo_lista.strip().capitalize()
+    if tipo_normalizado not in {"Minorista", "Mayorista"}:
+        raise ValueError("tipo_lista debe ser Minorista o Mayorista")
+
+    columna_precio = f"Precio {tipo_normalizado}"
+    df_pdf = filtrar_lista_para_pdf(df_listas_calculado, marca)
+    buffer = BytesIO()
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.5 * cm,
+        leftMargin=1.5 * cm,
+        topMargin=1.2 * cm,
+        bottomMargin=1.2 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    elementos = []
+    logo_path = Path(logo_path)
+    if logo_path.exists():
+        elementos.append(
+            Image(str(logo_path), width=3.2 * cm, height=3.2 * cm, kind="proportional")
+        )
+        elementos.append(Spacer(1, 0.2 * cm))
+    fecha = fecha_generacion or date.today()
+    elementos.extend(
+        [
+            Paragraph("Lista de precios Kiki Market", estilos["Title"]),
+            Paragraph(f"Tipo de lista: {tipo_normalizado}", estilos["Heading2"]),
+            Paragraph(
+                f"Fecha de generación: {fecha.strftime('%d/%m/%Y')}", estilos["Normal"]
+            ),
+            Spacer(1, 0.4 * cm),
+        ]
+    )
+    datos = [["Nombre", "Marca", "SKU", columna_precio]]
+    for _, fila in df_pdf.iterrows():
+        datos.append(
+            [
+                str(fila.get("Nombre", "")),
+                str(fila.get("Marca", "")),
+                str(fila.get("SKU", "")),
+                formatear_moneda_pdf(fila.get(columna_precio)),
+            ]
+        )
+    tabla = Table(
+        datos, repeatRows=1, colWidths=[7.2 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm]
+    )
+    tabla.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDE7F6")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    elementos.append(tabla)
+    elementos.extend([Spacer(1, 0.5 * cm), Paragraph(pie_pdf, estilos["Normal"])])
+    documento.build(elementos)
+    return buffer.getvalue()
+
+
+def obtener_marcas_listas(df: pd.DataFrame) -> list[str]:
+    """Devuelve marcas no vacías ordenadas para la sección de listas."""
+    return sorted(
+        marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
+    )
+
+
+def mostrar_listas_precios(df: pd.DataFrame) -> None:
+    """Muestra la funcionalidad independiente de listas sin tocar el simulador."""
+    st.divider()
+    with st.expander("Listas de precios", expanded=False):
+        st.header("Listas de precios")
+        st.write(
+            "Generá listas Minorista y Mayorista desde una copia independiente del CSV "
+            "cargado. Estos cambios no afectan la simulación ni la exportación CSV."
+        )
+
+        if "listas_tabla" not in st.session_state or st.session_state.get(
+            "listas_archivo_id"
+        ) != st.session_state.get("archivo_id"):
+            st.session_state["listas_tabla"] = preparar_tabla_listas_precios(df)
+            st.session_state["listas_multiplicadores_por_marca"] = {}
+            st.session_state["listas_pdf_minorista"] = None
+            st.session_state["listas_pdf_mayorista"] = None
+            st.session_state["listas_firma_pdf"] = None
+            st.session_state["listas_archivo_id"] = st.session_state.get("archivo_id")
+
+        col_min, col_may = st.columns(2)
+        multiplicador_minorista = col_min.number_input(
+            "Multiplicador Minorista",
+            min_value=0.0,
+            value=2.0,
+            step=0.1,
+            format="%.4f",
+            key="listas_multiplicador_minorista_general",
+        )
+        multiplicador_mayorista = col_may.number_input(
+            "Multiplicador Mayorista",
+            min_value=0.0,
+            value=1.6,
+            step=0.1,
+            format="%.4f",
+            key="listas_multiplicador_mayorista_general",
+        )
+
+        marcas = obtener_marcas_listas(df)
+        st.subheader("Multiplicadores por marca")
+        if marcas:
+            with st.form("listas_form_multiplicador_marca"):
+                col_marca, col_minorista, col_mayorista = st.columns([2, 1, 1])
+                marca_seleccionada = col_marca.selectbox(
+                    "Marca",
+                    options=marcas,
+                    key="listas_marca_multiplicador",
+                )
+                productos_marca = int(
+                    (
+                        st.session_state["listas_tabla"]["Marca"].astype(str)
+                        == str(marca_seleccionada)
+                    ).sum()
+                )
+                valores_actuales = st.session_state[
+                    "listas_multiplicadores_por_marca"
+                ].get(marca_seleccionada, {})
+                multiplicador_minorista_marca = col_minorista.number_input(
+                    "Multiplicador Minorista por marca",
+                    min_value=0.0,
+                    value=float(
+                        valores_actuales.get("minorista", multiplicador_minorista)
+                    ),
+                    step=0.1,
+                    format="%.4f",
+                    key="listas_multiplicador_minorista_marca",
+                )
+                multiplicador_mayorista_marca = col_mayorista.number_input(
+                    "Multiplicador Mayorista por marca",
+                    min_value=0.0,
+                    value=float(
+                        valores_actuales.get("mayorista", multiplicador_mayorista)
+                    ),
+                    step=0.1,
+                    format="%.4f",
+                    key="listas_multiplicador_mayorista_marca",
+                )
+                st.caption(
+                    f"Productos afectados por {marca_seleccionada}: {productos_marca}"
+                )
+                aplicar_marca = st.form_submit_button(
+                    "Aplicar multiplicadores a la marca"
+                )
+
+            if aplicar_marca:
+                st.session_state["listas_multiplicadores_por_marca"][
+                    marca_seleccionada
+                ] = {
+                    "minorista": multiplicador_minorista_marca,
+                    "mayorista": multiplicador_mayorista_marca,
+                }
+                st.session_state["listas_pdf_minorista"] = None
+                st.session_state["listas_pdf_mayorista"] = None
+                st.success(
+                    f"Multiplicadores aplicados a {productos_marca} productos de "
+                    f"{marca_seleccionada}."
+                )
+        else:
+            st.info("No hay marcas disponibles en el CSV.")
+
+        st.subheader("Edición de costos para listas")
+        st.caption(
+            "Esta edición usa una copia separada y no modifica la exportación CSV del "
+            "simulador."
+        )
+        tabla_listas_editada = st.data_editor(
+            st.session_state["listas_tabla"],
+            key="listas_editor_costos",
+            use_container_width=True,
+            num_rows="fixed",
+            disabled=["Nombre", "Marca", "SKU"],
+            column_config={
+                "Costo": st.column_config.NumberColumn(
+                    "Costo", min_value=0.0, format="%.2f"
+                )
+            },
+        )
+        if not tabla_listas_editada.equals(st.session_state["listas_tabla"]):
+            st.session_state["listas_pdf_minorista"] = None
+            st.session_state["listas_pdf_mayorista"] = None
+        st.session_state["listas_tabla"] = tabla_listas_editada.copy()
+
+        df_listas_calculado = calcular_listas_precios(
+            tabla_listas_editada,
+            multiplicador_minorista,
+            multiplicador_mayorista,
+            st.session_state["listas_multiplicadores_por_marca"],
+        )
+        productos_sin_costo = int(
+            (~tiene_costo_valido(df_listas_calculado["Costo"])).sum()
+        )
+        if productos_sin_costo:
+            st.warning(
+                f"{productos_sin_costo} productos no tienen costo y no serán incluidos "
+                "en el PDF"
+            )
+
+        st.subheader("Vista previa interna")
+        st.dataframe(
+            df_listas_calculado[COLUMNAS_LISTA_PRECIOS],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Costo": st.column_config.NumberColumn("Costo", format="%.2f"),
+                "Precio Minorista": st.column_config.NumberColumn(
+                    "Precio Minorista", format="%.2f"
+                ),
+                "Precio Mayorista": st.column_config.NumberColumn(
+                    "Precio Mayorista", format="%.2f"
+                ),
+            },
+        )
+
+        st.subheader("Generación de PDF")
+        filtro_marca = st.selectbox(
+            "Marcas a incluir en el PDF",
+            options=["Todas las marcas"] + marcas,
+            key="listas_filtro_marca_pdf",
+        )
+        pie_pdf = st.text_area(
+            "Pie del PDF",
+            value=PIE_PDF_LISTA_PRECIOS,
+            key="listas_pie_pdf",
+            height=100,
+        )
+        marca_pdf = None if filtro_marca == "Todas las marcas" else filtro_marca
+        df_pdf_filtrado = filtrar_lista_para_pdf(df_listas_calculado, marca_pdf)
+        firma_pdf = (
+            float(multiplicador_minorista),
+            float(multiplicador_mayorista),
+            tuple(
+                sorted(
+                    (
+                        marca,
+                        valores.get("minorista"),
+                        valores.get("mayorista"),
+                    )
+                    for marca, valores in st.session_state[
+                        "listas_multiplicadores_por_marca"
+                    ].items()
+                )
+            ),
+            filtro_marca,
+            pie_pdf,
+            int(pd.util.hash_pandas_object(tabla_listas_editada, index=True).sum()),
+        )
+        if st.session_state.get("listas_firma_pdf") != firma_pdf:
+            st.session_state["listas_pdf_minorista"] = None
+            st.session_state["listas_pdf_mayorista"] = None
+            st.session_state["listas_firma_pdf"] = firma_pdf
+        if df_pdf_filtrado.empty:
+            st.warning(
+                "No hay productos con costo válido para generar el PDF seleccionado."
+            )
+
+        col_pdf_minorista, col_pdf_mayorista = st.columns(2)
+        with col_pdf_minorista:
+            if st.button(
+                "Generar PDF Minorista",
+                key="listas_generar_pdf_minorista",
+                use_container_width=True,
+                disabled=df_pdf_filtrado.empty,
+            ):
+                try:
+                    st.session_state["listas_pdf_minorista"] = (
+                        generar_pdf_lista_precios(
+                            df_listas_calculado, "Minorista", pie_pdf, marca_pdf
+                        )
+                    )
+                except ModuleNotFoundError:
+                    st.error(
+                        "No se pudo generar el PDF porque falta instalar reportlab. "
+                        "Revisá requirements.txt y reinstalá dependencias."
+                    )
+            if st.session_state.get("listas_pdf_minorista"):
+                st.download_button(
+                    "Descargar PDF Minorista",
+                    data=st.session_state["listas_pdf_minorista"],
+                    file_name="lista_precios_kiki_minorista.pdf",
+                    mime="application/pdf",
+                    key="listas_descargar_pdf_minorista",
+                    use_container_width=True,
+                )
+
+        with col_pdf_mayorista:
+            if st.button(
+                "Generar PDF Mayorista",
+                key="listas_generar_pdf_mayorista",
+                use_container_width=True,
+                disabled=df_pdf_filtrado.empty,
+            ):
+                try:
+                    st.session_state["listas_pdf_mayorista"] = (
+                        generar_pdf_lista_precios(
+                            df_listas_calculado, "Mayorista", pie_pdf, marca_pdf
+                        )
+                    )
+                except ModuleNotFoundError:
+                    st.error(
+                        "No se pudo generar el PDF porque falta instalar reportlab. "
+                        "Revisá requirements.txt y reinstalá dependencias."
+                    )
+            if st.session_state.get("listas_pdf_mayorista"):
+                st.download_button(
+                    "Descargar PDF Mayorista",
+                    data=st.session_state["listas_pdf_mayorista"],
+                    file_name="lista_precios_kiki_mayorista.pdf",
+                    mime="application/pdf",
+                    key="listas_descargar_pdf_mayorista",
+                    use_container_width=True,
+                )
+
+
 def obtener_config_columnas() -> dict:
     """Centraliza nombres y formatos de columnas para todas las vistas."""
     return {
@@ -1170,6 +1600,8 @@ def main() -> None:
             "Conserva exactamente las columnas, el orden y las filas del CSV original; "
             "solo cambia Precio y Costo en las filas afectadas."
         )
+
+    mostrar_listas_precios(df)
 
 
 if __name__ == "__main__":
