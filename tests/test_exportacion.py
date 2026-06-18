@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import unittest
 from io import StringIO
 
@@ -196,9 +197,7 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
     def exportar_caso_regresion_sku_273700(
         self, *, precio="10,346.00", costo_editado=None, multiplicador=1
     ):
-        contenido_original, df_original = self.crear_caso_regresion_sku_273700(
-            precio
-        )
+        contenido_original, df_original = self.crear_caso_regresion_sku_273700(precio)
         df_trabajo = preparar_tabla_trabajo(df_original)
         costos_originales = df_trabajo["Costo"].copy()
         if costo_editado is not None:
@@ -274,7 +273,9 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertEqual(list(df_exportado.columns), list(df_original.columns))
         self.assertEqual(df_exportado.shape, df_original.shape)
 
-    def test_exportacion_precios_preserva_csv_original_excepto_precios_modificados(self):
+    def test_exportacion_precios_preserva_csv_original_excepto_precios_modificados(
+        self,
+    ):
         df_base = self.crear_csv_original_con_propiedades()
         df_base.loc[1, "Nombre"] = ""
         contenido_original = df_base.to_csv(
@@ -786,6 +787,77 @@ class ExportacionTiendaNubeTest(unittest.TestCase):
         self.assertNotIn("Nuevo Precio", df_releido.columns)
         self.assertNotIn("Multiplicador", df_releido.columns)
         self.assertIn(b'"17,525.28"', csv_exportado)
+
+
+class ListasPreciosTest(unittest.TestCase):
+    def crear_dataframe_listas(self):
+        return pd.DataFrame(
+            [
+                ["Producto A", "Marca 1", "SKU-A", "1.000,50"],
+                ["Producto B", "Marca 2", "SKU-B", "2000"],
+                ["Producto C", "Marca 1", "SKU-C", ""],
+            ],
+            columns=["Nombre", "Marca", "SKU", "Costo"],
+        )
+
+    def test_listas_precios_usa_copia_y_multiplicadores_por_marca(self):
+        from app import calcular_listas_precios, preparar_tabla_listas_precios
+
+        df_original = self.crear_dataframe_listas()
+        df_listas = preparar_tabla_listas_precios(df_original)
+        df_listas.loc[0, "Costo"] = 1500
+
+        df_calculado = calcular_listas_precios(
+            df_listas,
+            2.0,
+            1.5,
+            {"Marca 1": {"minorista": 3.0, "mayorista": 2.0}},
+        )
+
+        self.assertEqual(df_original.loc[0, "Costo"], "1.000,50")
+        self.assertEqual(df_calculado.loc[0, "Precio Minorista"], 4500)
+        self.assertEqual(df_calculado.loc[0, "Precio Mayorista"], 3000)
+        self.assertEqual(df_calculado.loc[1, "Precio Minorista"], 4000)
+        self.assertTrue(pd.isna(df_calculado.loc[2, "Precio Minorista"]))
+
+    def test_productos_sin_costo_no_van_a_lista_pdf(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+        df_pdf = filtrar_lista_para_pdf(df_calculado, "Marca 1")
+
+        self.assertEqual(df_pdf["SKU"].tolist(), ["SKU-A"])
+        self.assertNotIn("SKU-C", df_pdf["SKU"].tolist())
+
+    @unittest.skipIf(
+        importlib.util.find_spec("reportlab") is None, "reportlab no está instalado"
+    )
+    def test_pdf_filtra_sin_costo_y_no_mezcla_columnas(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            generar_pdf_lista_precios,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+        df_pdf = filtrar_lista_para_pdf(df_calculado, "Marca 1")
+        pdf = generar_pdf_lista_precios(
+            df_calculado,
+            "Minorista",
+            "Pie de prueba",
+            "Marca 1",
+        )
+
+        self.assertEqual(len(df_pdf), 1)
+        self.assertGreater(len(pdf), 1000)
+        self.assertTrue(pdf.startswith(b"%PDF"))
 
 
 if __name__ == "__main__":
