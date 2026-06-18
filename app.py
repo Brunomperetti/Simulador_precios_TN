@@ -830,7 +830,7 @@ def generar_pdf_lista_precios(
     """Genera un PDF de lista de precios minorista o mayorista."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import cm
     from reportlab.platypus import (
         Image,
@@ -857,6 +857,26 @@ def generar_pdf_lista_precios(
         bottomMargin=1.2 * cm,
     )
     estilos = getSampleStyleSheet()
+    estilo_celda = ParagraphStyle(
+        "CeldaListaPrecios",
+        parent=estilos["BodyText"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=10,
+        wordWrap="CJK",
+        splitLongWords=True,
+        spaceAfter=0,
+    )
+    estilo_celda_derecha = ParagraphStyle(
+        "CeldaListaPreciosDerecha",
+        parent=estilo_celda,
+        alignment=2,
+    )
+    estilo_encabezado_tabla = ParagraphStyle(
+        "EncabezadoListaPrecios",
+        parent=estilo_celda,
+        fontName="Helvetica-Bold",
+    )
     elementos = []
     logo_path = Path(logo_path)
     if logo_path.exists():
@@ -875,18 +895,27 @@ def generar_pdf_lista_precios(
             Spacer(1, 0.4 * cm),
         ]
     )
-    datos = [["Nombre", "Marca", "SKU", columna_precio]]
+    datos = [
+        [
+            Paragraph("Nombre", estilo_encabezado_tabla),
+            Paragraph("Marca", estilo_encabezado_tabla),
+            Paragraph("SKU", estilo_encabezado_tabla),
+            Paragraph(columna_precio, estilo_encabezado_tabla),
+        ]
+    ]
     for _, fila in df_pdf.iterrows():
         datos.append(
             [
-                str(fila.get("Nombre", "")),
-                str(fila.get("Marca", "")),
-                str(fila.get("SKU", "")),
-                formatear_moneda_pdf(fila.get(columna_precio)),
+                Paragraph(str(fila.get("Nombre", "")), estilo_celda),
+                Paragraph(str(fila.get("Marca", "")), estilo_celda),
+                Paragraph(str(fila.get("SKU", "")), estilo_celda),
+                Paragraph(
+                    formatear_moneda_pdf(fila.get(columna_precio)), estilo_celda_derecha
+                ),
             ]
         )
     tabla = Table(
-        datos, repeatRows=1, colWidths=[7.2 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm]
+        datos, repeatRows=1, colWidths=[8.8 * cm, 2.7 * cm, 2.8 * cm, 3.2 * cm]
     )
     tabla.setStyle(
         TableStyle(
@@ -896,7 +925,7 @@ def generar_pdf_lista_precios(
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+                ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
         )

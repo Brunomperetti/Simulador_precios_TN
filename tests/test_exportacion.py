@@ -859,6 +859,43 @@ class ListasPreciosTest(unittest.TestCase):
         self.assertGreater(len(pdf), 1000)
         self.assertTrue(pdf.startswith(b"%PDF"))
 
+    @unittest.skipIf(
+        importlib.util.find_spec("reportlab") is None, "reportlab no está instalado"
+    )
+    def test_pdf_lista_precios_soporta_logo_ausente_y_nombres_largos(self):
+        from app import (
+            calcular_listas_precios,
+            generar_pdf_lista_precios,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_listas.loc[0, "Nombre"] = (
+            "Producto natural con nombre extremadamente largo para validar que "
+            "la celda de Nombre ajusta el texto sin invadir Marca ni SKU"
+        )
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+
+        pdf_minorista_sin_logo = generar_pdf_lista_precios(
+            df_calculado,
+            "Minorista",
+            "Pie de prueba",
+            "Marca 1",
+            logo_path="assets/logo_inexistente.png",
+        )
+        pdf_mayorista_sin_logo = generar_pdf_lista_precios(
+            df_calculado,
+            "Mayorista",
+            "Pie de prueba",
+            "Marca 1",
+            logo_path="assets/logo_inexistente.png",
+        )
+
+        self.assertGreater(len(pdf_minorista_sin_logo), 1000)
+        self.assertGreater(len(pdf_mayorista_sin_logo), 1000)
+        self.assertTrue(pdf_minorista_sin_logo.startswith(b"%PDF"))
+        self.assertTrue(pdf_mayorista_sin_logo.startswith(b"%PDF"))
+
 
 if __name__ == "__main__":
     unittest.main()
