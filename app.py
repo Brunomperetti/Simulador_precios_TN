@@ -803,13 +803,48 @@ def calcular_listas_precios(
 
 
 def filtrar_lista_para_pdf(
-    df_listas_calculado: pd.DataFrame, marca: str | None
+    df_listas_calculado: pd.DataFrame,
+    marca: str | None,
+    indices_incluidos: set | None = None,
 ) -> pd.DataFrame:
-    """Filtra por marca cuando corresponde y quita productos sin costo válido."""
+    """Filtra por marca, exclusiones opcionales y productos sin costo válido."""
     df_pdf = df_listas_calculado.copy()
     if marca and marca != "Todas las marcas":
         df_pdf = df_pdf[df_pdf["Marca"].astype(str) == str(marca)]
+    if indices_incluidos is not None:
+        df_pdf = df_pdf[df_pdf.index.isin(indices_incluidos)]
     return df_pdf[tiene_costo_valido(df_pdf["Costo"])]
+
+
+def preparar_tabla_exclusion_pdf(
+    df_listas_calculado: pd.DataFrame, inclusiones_pdf: dict
+) -> pd.DataFrame:
+    """Arma la tabla editable de inclusión sin modificar la tabla de listas."""
+    columnas = ["Nombre", "SKU", "Marca"]
+    df_validos = df_listas_calculado[tiene_costo_valido(df_listas_calculado["Costo"])]
+    tabla_exclusion = df_validos[columnas].copy()
+    tabla_exclusion["Incluir en PDF"] = [
+        bool(inclusiones_pdf.get(indice, True)) for indice in tabla_exclusion.index
+    ]
+    return tabla_exclusion
+
+
+def filtrar_tabla_exclusion_pdf(
+    tabla_exclusion: pd.DataFrame, nombre: str = "", sku: str = "", marca: str = ""
+) -> pd.DataFrame:
+    """Filtra la tabla de exclusión por Nombre, SKU y Marca."""
+    tabla_filtrada = tabla_exclusion.copy()
+    filtros = {"Nombre": nombre, "SKU": sku, "Marca": marca}
+    for columna, texto in filtros.items():
+        texto = str(texto).strip()
+        if texto:
+            coincide_filtro = (
+                tabla_filtrada[columna]
+                .astype(str)
+                .str.contains(texto, case=False, na=False)
+            )
+            tabla_filtrada = tabla_filtrada[coincide_filtro]
+    return tabla_filtrada
 
 
 def formatear_moneda_pdf(valor) -> str:
@@ -826,6 +861,7 @@ def generar_pdf_lista_precios(
     marca: str | None = None,
     logo_path: Path | str = LOGO_KIKI_PREDETERMINADO,
     fecha_generacion: date | None = None,
+    indices_incluidos: set | None = None,
 ) -> bytes:
     """Genera un PDF de lista de precios minorista o mayorista."""
     from reportlab.lib import colors
@@ -846,7 +882,7 @@ def generar_pdf_lista_precios(
         raise ValueError("tipo_lista debe ser Minorista o Mayorista")
 
     columna_precio = f"Precio {tipo_normalizado}"
-    df_pdf = filtrar_lista_para_pdf(df_listas_calculado, marca)
+    df_pdf = filtrar_lista_para_pdf(df_listas_calculado, marca, indices_incluidos)
     buffer = BytesIO()
     documento = SimpleDocTemplate(
         buffer,
@@ -961,6 +997,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             st.session_state["listas_pdf_minorista"] = None
             st.session_state["listas_pdf_mayorista"] = None
             st.session_state["listas_firma_pdf"] = None
+            st.session_state["listas_inclusiones_pdf"] = {}
             st.session_state["listas_archivo_id"] = st.session_state.get("archivo_id")
 
         col_min, col_may = st.columns(2)
@@ -1080,6 +1117,55 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                 "en el PDF"
             )
 
+        st.subheader("Excluir productos del PDF")
+        st.caption(
+            "Desmarcá productos específicos para quitarlos solo de los PDFs. "
+            "No modifica la simulación, los cálculos ni la exportación CSV."
+        )
+        tabla_exclusion_pdf = preparar_tabla_exclusion_pdf(
+            df_listas_calculado, st.session_state["listas_inclusiones_pdf"]
+        )
+        col_filtro_nombre, col_filtro_sku, col_filtro_marca = st.columns(3)
+        filtro_exclusion_nombre = col_filtro_nombre.text_input(
+            "Filtrar por Nombre", key="listas_filtro_exclusion_nombre"
+        )
+        filtro_exclusion_sku = col_filtro_sku.text_input(
+            "Filtrar por SKU", key="listas_filtro_exclusion_sku"
+        )
+        filtro_exclusion_marca = col_filtro_marca.text_input(
+            "Filtrar por Marca", key="listas_filtro_exclusion_marca"
+        )
+        tabla_exclusion_filtrada = filtrar_tabla_exclusion_pdf(
+            tabla_exclusion_pdf,
+            filtro_exclusion_nombre,
+            filtro_exclusion_sku,
+            filtro_exclusion_marca,
+        )
+        tabla_exclusion_editada = st.data_editor(
+            tabla_exclusion_filtrada,
+            key="listas_editor_exclusion_pdf",
+            use_container_width=True,
+            num_rows="fixed",
+            disabled=["Nombre", "SKU", "Marca"],
+            column_config={
+                "Incluir en PDF": st.column_config.CheckboxColumn(
+                    "Incluir en PDF", default=True
+                )
+            },
+        )
+        for indice, incluir in tabla_exclusion_editada["Incluir en PDF"].items():
+            st.session_state["listas_inclusiones_pdf"][indice] = bool(incluir)
+        indices_incluidos_pdf = set(
+            preparar_tabla_exclusion_pdf(
+                df_listas_calculado, st.session_state["listas_inclusiones_pdf"]
+            )
+            .query("`Incluir en PDF` == True")
+            .index
+        )
+        productos_excluidos_pdf = len(tabla_exclusion_pdf) - len(indices_incluidos_pdf)
+        if productos_excluidos_pdf:
+            st.info(f"Productos excluidos del PDF: {productos_excluidos_pdf}")
+
         st.subheader("Vista previa interna")
         st.dataframe(
             df_listas_calculado[COLUMNAS_LISTA_PRECIOS],
@@ -1109,7 +1195,9 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             height=100,
         )
         marca_pdf = None if filtro_marca == "Todas las marcas" else filtro_marca
-        df_pdf_filtrado = filtrar_lista_para_pdf(df_listas_calculado, marca_pdf)
+        df_pdf_filtrado = filtrar_lista_para_pdf(
+            df_listas_calculado, marca_pdf, indices_incluidos_pdf
+        )
         firma_pdf = (
             float(multiplicador_minorista),
             float(multiplicador_mayorista),
@@ -1128,6 +1216,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             filtro_marca,
             pie_pdf,
             int(pd.util.hash_pandas_object(tabla_listas_editada, index=True).sum()),
+            tuple(sorted(indices_incluidos_pdf)),
         )
         if st.session_state.get("listas_firma_pdf") != firma_pdf:
             st.session_state["listas_pdf_minorista"] = None
@@ -1149,7 +1238,11 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                 try:
                     st.session_state["listas_pdf_minorista"] = (
                         generar_pdf_lista_precios(
-                            df_listas_calculado, "Minorista", pie_pdf, marca_pdf
+                            df_listas_calculado,
+                            "Minorista",
+                            pie_pdf,
+                            marca_pdf,
+                            indices_incluidos=indices_incluidos_pdf,
                         )
                     )
                 except ModuleNotFoundError:
@@ -1177,7 +1270,11 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                 try:
                     st.session_state["listas_pdf_mayorista"] = (
                         generar_pdf_lista_precios(
-                            df_listas_calculado, "Mayorista", pie_pdf, marca_pdf
+                            df_listas_calculado,
+                            "Mayorista",
+                            pie_pdf,
+                            marca_pdf,
+                            indices_incluidos=indices_incluidos_pdf,
                         )
                     )
                 except ModuleNotFoundError:

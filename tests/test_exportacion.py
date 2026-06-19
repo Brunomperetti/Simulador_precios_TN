@@ -834,6 +834,61 @@ class ListasPreciosTest(unittest.TestCase):
         self.assertEqual(df_pdf["SKU"].tolist(), ["SKU-A"])
         self.assertNotIn("SKU-C", df_pdf["SKU"].tolist())
 
+    def test_exclusiones_pdf_respetan_marca_y_no_alteran_calculos(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            preparar_tabla_exclusion_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+        df_calculado_original = df_calculado.copy(deep=True)
+
+        tabla_exclusion = preparar_tabla_exclusion_pdf(df_calculado, {})
+        self.assertEqual(tabla_exclusion["Incluir en PDF"].tolist(), [True, True])
+
+        df_sin_exclusiones = filtrar_lista_para_pdf(df_calculado, None)
+        df_con_exclusiones = filtrar_lista_para_pdf(df_calculado, None, {0})
+        df_marca_excluida = filtrar_lista_para_pdf(df_calculado, "Marca 2", {0})
+
+        self.assertEqual(df_sin_exclusiones["SKU"].tolist(), ["SKU-A", "SKU-B"])
+        self.assertEqual(df_con_exclusiones["SKU"].tolist(), ["SKU-A"])
+        self.assertTrue(df_marca_excluida.empty)
+        pd.testing.assert_frame_equal(df_calculado, df_calculado_original)
+
+    def test_tabla_exclusion_pdf_filtra_por_nombre_sku_y_marca(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_tabla_exclusion_pdf,
+            preparar_tabla_exclusion_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+        tabla_exclusion = preparar_tabla_exclusion_pdf(df_calculado, {1: False})
+
+        self.assertEqual(
+            filtrar_tabla_exclusion_pdf(tabla_exclusion, nombre="producto b")[
+                "SKU"
+            ].tolist(),
+            ["SKU-B"],
+        )
+        self.assertEqual(
+            filtrar_tabla_exclusion_pdf(tabla_exclusion, sku="sku-a")[
+                "Nombre"
+            ].tolist(),
+            ["Producto A"],
+        )
+        self.assertEqual(
+            filtrar_tabla_exclusion_pdf(tabla_exclusion, marca="marca 2")[
+                "Incluir en PDF"
+            ].tolist(),
+            [False],
+        )
+
     @unittest.skipIf(
         importlib.util.find_spec("reportlab") is None, "reportlab no está instalado"
     )
