@@ -2,8 +2,9 @@ import csv
 import hashlib
 from datetime import date
 from io import BytesIO, StringIO
-from pathlib import Path
 from numbers import Real
+from pathlib import Path
+import re
 
 import pandas as pd
 import streamlit as st
@@ -58,6 +59,27 @@ PIE_PDF_LISTA_PRECIOS = (
     "Forma de pago: transferencia o efectivo. Transporte a cargo del comprador."
 )
 LOGO_KIKI_PREDETERMINADO = Path("assets/logo_kiki.png")
+
+TIPOS_PRODUCTO_LISTAS = ["Todos", "Alimentos", "Suplementos"]
+MARCAS_SUPLEMENTOS_LISTAS = {
+    "GEONAT",
+    "PROVEFARMA",
+    "VITAMIN WAY",
+    "LABORATORIOS PHARMAMERICAN",
+    "HORBAACH",
+    "NATURAL LIFE",
+    "NATUFARMA",
+    "GENEO",
+    "EXTENSION LIFE",
+    "SUNDANCE",
+    "NATURES TRUTH",
+    "COLABELLA",
+    "NEW GARDEN",
+    "BLACK MACA",
+    "CRINWAY",
+    "SRI SRI TATTVA",
+    "NATURE MADE",
+}
 
 
 def detectar_separador(contenido: bytes) -> str:
@@ -752,6 +774,70 @@ def generar_csv_descarga(
     return csv_texto.encode(encoding_exportacion)
 
 
+def normalizar_marca_tipo_producto(marca) -> str:
+    """Normaliza marcas para clasificar listas tolerando espacios y apóstrofes."""
+    texto = "" if pd.isna(marca) else str(marca)
+    texto = texto.upper().replace("'", "").replace("’", "")
+    return " ".join(re.sub(r"[^A-Z0-9]+", " ", texto).split())
+
+
+def obtener_clave_marca_tipo_producto(marca) -> tuple[str, ...]:
+    """Devuelve tokens ordenados para tolerar inversiones como LIFE EXTENSION."""
+    return tuple(sorted(normalizar_marca_tipo_producto(marca).split()))
+
+
+CLAVES_MARCAS_SUPLEMENTOS_LISTAS = {
+    obtener_clave_marca_tipo_producto(marca) for marca in MARCAS_SUPLEMENTOS_LISTAS
+}
+
+
+def clasificar_tipo_producto_listas(marca) -> str:
+    """Clasifica productos de listas como Suplementos o Alimentos según su marca."""
+    if obtener_clave_marca_tipo_producto(marca) in CLAVES_MARCAS_SUPLEMENTOS_LISTAS:
+        return "Suplementos"
+    return "Alimentos"
+
+
+def calcular_mascara_tipo_producto_listas(
+    df_listas: pd.DataFrame, tipo_producto: str | None
+) -> pd.Series:
+    """Calcula la máscara del filtro primario de tipo para listas de precios."""
+    tipo_normalizado = (
+        tipo_producto if tipo_producto in TIPOS_PRODUCTO_LISTAS else "Todos"
+    )
+    if tipo_normalizado == "Todos":
+        return pd.Series(True, index=df_listas.index)
+
+    tipos = df_listas["Marca"].map(clasificar_tipo_producto_listas)
+    return tipos.eq(tipo_normalizado)
+
+
+def filtrar_lista_por_tipo_producto(
+    df_listas: pd.DataFrame, tipo_producto: str | None
+) -> pd.DataFrame:
+    """Filtra listas por Todos, Alimentos o Suplementos sin modificar cálculos."""
+    mascara = calcular_mascara_tipo_producto_listas(df_listas, tipo_producto)
+    return df_listas[mascara]
+
+
+def obtener_metricas_tipo_producto_listas(
+    df_listas: pd.DataFrame, tipo_producto: str | None
+) -> dict[str, int]:
+    """Cuenta productos totales, alimentos, suplementos y visibles por filtro."""
+    tipos = df_listas["Marca"].map(clasificar_tipo_producto_listas)
+    tipo_normalizado = (
+        tipo_producto if tipo_producto in TIPOS_PRODUCTO_LISTAS else "Todos"
+    )
+    return {
+        "Todos": int(len(df_listas)),
+        "Alimentos": int(tipos.eq("Alimentos").sum()),
+        "Suplementos": int(tipos.eq("Suplementos").sum()),
+        "filtrados": int(
+            calcular_mascara_tipo_producto_listas(df_listas, tipo_normalizado).sum()
+        ),
+    }
+
+
 def preparar_tabla_listas_precios(df_original: pd.DataFrame) -> pd.DataFrame:
     """Crea una copia independiente para listas de precios sin tocar la simulación."""
     df_listas = df_original[["Nombre", "Marca", "SKU", "Costo"]].copy()
@@ -806,9 +892,10 @@ def filtrar_lista_para_pdf(
     df_listas_calculado: pd.DataFrame,
     marca: str | None,
     indices_incluidos: set | None = None,
+    tipo_producto: str | None = "Todos",
 ) -> pd.DataFrame:
-    """Filtra por marca, exclusiones opcionales y productos sin costo válido."""
-    df_pdf = df_listas_calculado.copy()
+    """Filtra por tipo, marca, exclusiones opcionales y productos sin costo válido."""
+    df_pdf = filtrar_lista_por_tipo_producto(df_listas_calculado, tipo_producto)
     if marca and marca != "Todas las marcas":
         df_pdf = df_pdf[df_pdf["Marca"].astype(str) == str(marca)]
     if indices_incluidos is not None:
@@ -817,11 +904,14 @@ def filtrar_lista_para_pdf(
 
 
 def preparar_tabla_exclusion_pdf(
-    df_listas_calculado: pd.DataFrame, inclusiones_pdf: dict
+    df_listas_calculado: pd.DataFrame,
+    inclusiones_pdf: dict,
+    tipo_producto: str | None = "Todos",
 ) -> pd.DataFrame:
     """Arma la tabla editable de inclusión sin modificar la tabla de listas."""
     columnas = ["Nombre", "SKU", "Marca"]
-    df_validos = df_listas_calculado[tiene_costo_valido(df_listas_calculado["Costo"])]
+    df_filtrado = filtrar_lista_por_tipo_producto(df_listas_calculado, tipo_producto)
+    df_validos = df_filtrado[tiene_costo_valido(df_filtrado["Costo"])]
     tabla_exclusion = df_validos[columnas].copy()
     tabla_exclusion["Incluir en PDF"] = [
         bool(inclusiones_pdf.get(indice, True)) for indice in tabla_exclusion.index
@@ -862,6 +952,7 @@ def generar_pdf_lista_precios(
     logo_path: Path | str = LOGO_KIKI_PREDETERMINADO,
     fecha_generacion: date | None = None,
     indices_incluidos: set | None = None,
+    tipo_producto: str | None = "Todos",
 ) -> bytes:
     """Genera un PDF de lista de precios minorista o mayorista."""
     from reportlab.lib import colors
@@ -882,7 +973,9 @@ def generar_pdf_lista_precios(
         raise ValueError("tipo_lista debe ser Minorista o Mayorista")
 
     columna_precio = f"Precio {tipo_normalizado}"
-    df_pdf = filtrar_lista_para_pdf(df_listas_calculado, marca, indices_incluidos)
+    df_pdf = filtrar_lista_para_pdf(
+        df_listas_calculado, marca, indices_incluidos, tipo_producto
+    )
     buffer = BytesIO()
     documento = SimpleDocTemplate(
         buffer,
@@ -925,6 +1018,9 @@ def generar_pdf_lista_precios(
         [
             Paragraph("Lista de precios Kiki Market", estilos["Title"]),
             Paragraph(f"Tipo de lista: {tipo_normalizado}", estilos["Heading2"]),
+            Paragraph(
+                f"Tipo de producto: {tipo_producto or 'Todos'}", estilos["Normal"]
+            ),
             Paragraph(
                 f"Fecha de generación: {fecha.strftime('%d/%m/%Y')}", estilos["Normal"]
             ),
@@ -1108,8 +1204,27 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             multiplicador_mayorista,
             st.session_state["listas_multiplicadores_por_marca"],
         )
+        tipo_producto_pdf = st.selectbox(
+            "Tipo de producto",
+            options=TIPOS_PRODUCTO_LISTAS,
+            index=0,
+            key="listas_tipo_producto",
+        )
+        metricas_tipo_producto = obtener_metricas_tipo_producto_listas(
+            df_listas_calculado, tipo_producto_pdf
+        )
+        st.caption(
+            "Productos en "
+            f"{tipo_producto_pdf}: {metricas_tipo_producto['filtrados']} "
+            f"(Todos: {metricas_tipo_producto['Todos']} | "
+            f"Alimentos: {metricas_tipo_producto['Alimentos']} | "
+            f"Suplementos: {metricas_tipo_producto['Suplementos']})"
+        )
+        df_listas_filtrado_tipo = filtrar_lista_por_tipo_producto(
+            df_listas_calculado, tipo_producto_pdf
+        )
         productos_sin_costo = int(
-            (~tiene_costo_valido(df_listas_calculado["Costo"])).sum()
+            (~tiene_costo_valido(df_listas_filtrado_tipo["Costo"])).sum()
         )
         if productos_sin_costo:
             st.warning(
@@ -1123,7 +1238,9 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             "No modifica la simulación, los cálculos ni la exportación CSV."
         )
         tabla_exclusion_pdf = preparar_tabla_exclusion_pdf(
-            df_listas_calculado, st.session_state["listas_inclusiones_pdf"]
+            df_listas_calculado,
+            st.session_state["listas_inclusiones_pdf"],
+            tipo_producto_pdf,
         )
         col_filtro_nombre, col_filtro_sku, col_filtro_marca = st.columns(3)
         filtro_exclusion_nombre = col_filtro_nombre.text_input(
@@ -1157,7 +1274,9 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             st.session_state["listas_inclusiones_pdf"][indice] = bool(incluir)
         indices_incluidos_pdf = set(
             preparar_tabla_exclusion_pdf(
-                df_listas_calculado, st.session_state["listas_inclusiones_pdf"]
+                df_listas_calculado,
+                st.session_state["listas_inclusiones_pdf"],
+                tipo_producto_pdf,
             )
             .query("`Incluir en PDF` == True")
             .index
@@ -1168,7 +1287,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
 
         st.subheader("Vista previa interna")
         st.dataframe(
-            df_listas_calculado[COLUMNAS_LISTA_PRECIOS],
+            df_listas_filtrado_tipo[COLUMNAS_LISTA_PRECIOS],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1196,7 +1315,10 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
         )
         marca_pdf = None if filtro_marca == "Todas las marcas" else filtro_marca
         df_pdf_filtrado = filtrar_lista_para_pdf(
-            df_listas_calculado, marca_pdf, indices_incluidos_pdf
+            df_listas_calculado,
+            marca_pdf,
+            indices_incluidos_pdf,
+            tipo_producto_pdf,
         )
         firma_pdf = (
             float(multiplicador_minorista),
@@ -1214,6 +1336,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                 )
             ),
             filtro_marca,
+            tipo_producto_pdf,
             pie_pdf,
             int(pd.util.hash_pandas_object(tabla_listas_editada, index=True).sum()),
             tuple(sorted(indices_incluidos_pdf)),
@@ -1243,6 +1366,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                             pie_pdf,
                             marca_pdf,
                             indices_incluidos=indices_incluidos_pdf,
+                            tipo_producto=tipo_producto_pdf,
                         )
                     )
                 except ModuleNotFoundError:
@@ -1275,6 +1399,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                             pie_pdf,
                             marca_pdf,
                             indices_incluidos=indices_incluidos_pdf,
+                            tipo_producto=tipo_producto_pdf,
                         )
                     )
                 except ModuleNotFoundError:
