@@ -912,7 +912,50 @@ def filtrar_lista_para_pdf(
         df_pdf = df_pdf[df_pdf["Marca"].astype(str).isin(marcas)]
     if indices_incluidos is not None:
         df_pdf = df_pdf[df_pdf.index.isin(indices_incluidos)]
-    return df_pdf[tiene_costo_valido(df_pdf["Costo"])]
+    df_pdf = df_pdf[tiene_costo_valido(df_pdf["Costo"])]
+    return ordenar_lista_pdf_por_marca_y_nombre(df_pdf)
+
+
+def ordenar_lista_pdf_por_marca_y_nombre(df_pdf: pd.DataFrame) -> pd.DataFrame:
+    """Ordena el PDF por Marca y luego Nombre sin alterar el dataframe original."""
+    if df_pdf.empty:
+        return df_pdf.copy()
+    return df_pdf.sort_values(
+        by=["Marca", "Nombre"],
+        key=lambda serie: serie.astype(str).str.casefold(),
+        kind="mergesort",
+    )
+
+
+def obtener_productos_sin_costo_listas(
+    df_listas_calculado: pd.DataFrame,
+    marcas: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    tipo_producto: str | None = "Todos",
+) -> pd.DataFrame:
+    """Devuelve productos sin costo válido para control, respetando tipo y marcas."""
+    df_reporte = filtrar_lista_por_tipo_producto(df_listas_calculado, tipo_producto)
+    marcas_normalizadas = normalizar_marcas_seleccionadas_listas(marcas)
+    if marcas_normalizadas:
+        df_reporte = df_reporte[
+            df_reporte["Marca"].astype(str).isin(marcas_normalizadas)
+        ]
+    df_reporte = df_reporte[~tiene_costo_valido(df_reporte["Costo"])]
+    columnas = ["Nombre", "Marca", "SKU", "Costo"]
+    if df_reporte.empty:
+        return df_reporte[columnas].copy()
+    return df_reporte[columnas].sort_values(
+        by=["Marca", "Nombre"],
+        key=lambda serie: serie.astype(str).str.casefold(),
+        kind="mergesort",
+    )
+
+
+def generar_csv_productos_sin_costo_listas(df_productos_sin_costo: pd.DataFrame) -> bytes:
+    """Genera un CSV de control de productos sin costo, independiente del CSV original."""
+    columnas = ["Nombre", "Marca", "SKU", "Costo"]
+    return df_productos_sin_costo[columnas].to_csv(index=False).encode(
+        "utf-8-sig"
+    )
 
 
 def preparar_tabla_exclusion_pdf(
@@ -1053,16 +1096,21 @@ def generar_pdf_lista_precios(
         elementos.append(Paragraph(marca_grupo or "Sin marca", estilo_marca))
         datos = [
             [
-                Paragraph("Nombre", estilo_encabezado_tabla),
-                Paragraph("SKU", estilo_encabezado_tabla),
+                Paragraph("Nombre / Producto", estilo_encabezado_tabla),
+                Paragraph("Marca", estilo_encabezado_tabla),
                 Paragraph(columna_precio, estilo_encabezado_tabla),
             ]
         ]
+        df_marca = df_marca.sort_values(
+            by="Nombre",
+            key=lambda serie: serie.astype(str).str.casefold(),
+            kind="mergesort",
+        )
         for _, fila in df_marca.iterrows():
             datos.append(
                 [
                     Paragraph(str(fila.get("Nombre", "")), estilo_celda),
-                    Paragraph(str(fila.get("SKU", "")), estilo_celda),
+                    Paragraph(str(fila.get("Marca", "")), estilo_celda),
                     Paragraph(
                         formatear_moneda_pdf(fila.get(columna_precio)),
                         estilo_celda_derecha,
@@ -1070,7 +1118,7 @@ def generar_pdf_lista_precios(
                 ]
             )
         tabla = Table(
-            datos, repeatRows=1, colWidths=[11.0 * cm, 3.2 * cm, 3.3 * cm]
+            datos, repeatRows=1, colWidths=[10.0 * cm, 4.0 * cm, 3.5 * cm]
         )
         tabla.setStyle(
             TableStyle(
@@ -1252,13 +1300,51 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
         df_listas_filtrado_tipo = filtrar_lista_por_tipo_producto(
             df_listas_calculado, tipo_producto_pdf
         )
-        productos_sin_costo = int(
-            (~tiene_costo_valido(df_listas_filtrado_tipo["Costo"])).sum()
+        marcas_disponibles_pdf = obtener_marcas_listas(
+            df_listas_calculado, tipo_producto_pdf
         )
+        marcas_pdf = st.multiselect(
+            "Marcas a incluir en el PDF y reporte sin costo",
+            options=marcas_disponibles_pdf,
+            key="listas_filtro_marcas_pdf",
+            help="Dejá vacío para incluir todas las marcas del tipo de producto elegido.",
+        )
+        marca_pdf = marcas_pdf
+        df_productos_sin_costo = obtener_productos_sin_costo_listas(
+            df_listas_calculado, marca_pdf, tipo_producto_pdf
+        )
+        productos_sin_costo = len(df_productos_sin_costo)
         if productos_sin_costo:
             st.warning(
                 f"{productos_sin_costo} productos no tienen costo y no serán incluidos "
                 "en el PDF"
+            )
+
+        st.subheader("Productos sin costo")
+        st.caption(
+            "Reporte de control: respeta Tipo de producto y marcas seleccionadas, "
+            "pero no aplica exclusiones manuales del PDF ni modifica el CSV original."
+        )
+        if df_productos_sin_costo.empty:
+            st.success(
+                "No hay productos sin costo válido para los filtros seleccionados."
+            )
+        else:
+            st.dataframe(
+                df_productos_sin_costo,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Costo": st.column_config.NumberColumn("Costo", format="%.2f")
+                },
+            )
+            st.download_button(
+                "Descargar CSV de productos sin costo",
+                data=generar_csv_productos_sin_costo_listas(df_productos_sin_costo),
+                file_name="productos_sin_costo_listas.csv",
+                mime="text/csv",
+                key="listas_descargar_productos_sin_costo",
+                use_container_width=True,
             )
 
         st.subheader("Excluir productos del PDF")
@@ -1331,22 +1417,12 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
         )
 
         st.subheader("Generación de PDF")
-        marcas_disponibles_pdf = obtener_marcas_listas(
-            df_listas_calculado, tipo_producto_pdf
-        )
-        marcas_pdf = st.multiselect(
-            "Marcas a incluir en el PDF",
-            options=marcas_disponibles_pdf,
-            key="listas_filtro_marcas_pdf",
-            help="Dejá vacío para incluir todas las marcas del tipo de producto elegido.",
-        )
         pie_pdf = st.text_area(
             "Pie del PDF",
             value=PIE_PDF_LISTA_PRECIOS,
             key="listas_pie_pdf",
             height=100,
         )
-        marca_pdf = marcas_pdf
         df_pdf_filtrado = filtrar_lista_para_pdf(
             df_listas_calculado,
             marca_pdf,
