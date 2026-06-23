@@ -882,6 +882,79 @@ class ListasPreciosTest(unittest.TestCase):
             ["SKU-VIT", "SKU-TRU", "SKU-LIF"],
         )
 
+
+    def test_multimarca_pdf_vacio_una_y_varias_marcas(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+
+        df_sin_marcas = filtrar_lista_para_pdf(df_calculado, [])
+        df_todas = filtrar_lista_para_pdf(df_calculado, None)
+        df_una_marca = filtrar_lista_para_pdf(df_calculado, ["Marca 1"])
+        df_una_marca_anterior = filtrar_lista_para_pdf(df_calculado, "Marca 1")
+        df_varias_marcas = filtrar_lista_para_pdf(
+            df_calculado, ["Marca 1", "Marca 2"]
+        )
+
+        pd.testing.assert_frame_equal(df_sin_marcas, df_todas)
+        pd.testing.assert_frame_equal(df_una_marca, df_una_marca_anterior)
+        self.assertEqual(df_varias_marcas["SKU"].tolist(), ["SKU-A", "SKU-B"])
+
+    def test_marcas_disponibles_respetan_tipo_producto(self):
+        from app import obtener_marcas_listas, preparar_tabla_listas_precios
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_tipos_producto())
+
+        self.assertEqual(
+            obtener_marcas_listas(df_listas, "Suplementos"),
+            ["GEONAT", "Life Extension", "NATURE'S TRUTH", "Vitamin Way"],
+        )
+        self.assertEqual(
+            obtener_marcas_listas(df_listas, "Alimentos"), ["Marca Alimentos"]
+        )
+        self.assertEqual(
+            obtener_marcas_listas(df_listas, "Todos"),
+            [
+                "GEONAT",
+                "Life Extension",
+                "Marca Alimentos",
+                "NATURE'S TRUTH",
+                "Vitamin Way",
+            ],
+        )
+
+    def test_multimarca_combina_tipo_exclusiones_y_sin_costo(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            preparar_tabla_exclusion_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_tipos_producto())
+        df_listas.loc[1, "Costo"] = None
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+        tabla_exclusion = preparar_tabla_exclusion_pdf(
+            df_calculado, {2: False}, tipo_producto="Suplementos"
+        )
+        indices_incluidos = set(
+            tabla_exclusion.query("`Incluir en PDF` == True").index
+        )
+
+        df_pdf = filtrar_lista_para_pdf(
+            df_calculado,
+            ["GEONAT", "Vitamin Way", "NATURE'S TRUTH", "Marca Alimentos"],
+            indices_incluidos=indices_incluidos,
+            tipo_producto="Suplementos",
+        )
+
+        self.assertEqual(df_pdf["SKU"].tolist(), ["SKU-GEO"])
+
     def test_listas_precios_usa_copia_y_multiplicadores_por_marca(self):
         from app import calcular_listas_precios, preparar_tabla_listas_precios
 

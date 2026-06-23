@@ -888,16 +888,28 @@ def calcular_listas_precios(
     return df_calculado
 
 
+def normalizar_marcas_seleccionadas_listas(
+    marcas: str | list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    """Normaliza el filtro mult marca de listas; vacío equivale a todas."""
+    if marcas is None:
+        return []
+    if isinstance(marcas, str):
+        marcas = [] if marcas == "Todas las marcas" else [marcas]
+    return [str(marca) for marca in marcas if str(marca).strip()]
+
+
 def filtrar_lista_para_pdf(
     df_listas_calculado: pd.DataFrame,
-    marca: str | None,
+    marca: str | list[str] | tuple[str, ...] | set[str] | None,
     indices_incluidos: set | None = None,
     tipo_producto: str | None = "Todos",
 ) -> pd.DataFrame:
-    """Filtra por tipo, marca, exclusiones opcionales y productos sin costo válido."""
+    """Filtra por tipo, marcas, exclusiones opcionales y productos sin costo válido."""
     df_pdf = filtrar_lista_por_tipo_producto(df_listas_calculado, tipo_producto)
-    if marca and marca != "Todas las marcas":
-        df_pdf = df_pdf[df_pdf["Marca"].astype(str) == str(marca)]
+    marcas = normalizar_marcas_seleccionadas_listas(marca)
+    if marcas:
+        df_pdf = df_pdf[df_pdf["Marca"].astype(str).isin(marcas)]
     if indices_incluidos is not None:
         df_pdf = df_pdf[df_pdf.index.isin(indices_incluidos)]
     return df_pdf[tiene_costo_valido(df_pdf["Costo"])]
@@ -948,7 +960,7 @@ def generar_pdf_lista_precios(
     df_listas_calculado: pd.DataFrame,
     tipo_lista: str,
     pie_pdf: str,
-    marca: str | None = None,
+    marca: str | list[str] | tuple[str, ...] | set[str] | None = None,
     logo_path: Path | str = LOGO_KIKI_PREDETERMINADO,
     fecha_generacion: date | None = None,
     indices_incluidos: set | None = None,
@@ -1027,51 +1039,68 @@ def generar_pdf_lista_precios(
             Spacer(1, 0.4 * cm),
         ]
     )
-    datos = [
-        [
-            Paragraph("Nombre", estilo_encabezado_tabla),
-            Paragraph("Marca", estilo_encabezado_tabla),
-            Paragraph("SKU", estilo_encabezado_tabla),
-            Paragraph(columna_precio, estilo_encabezado_tabla),
+    estilo_marca = ParagraphStyle(
+        "MarcaListaPrecios",
+        parent=estilos["Heading3"],
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#4A148C"),
+        spaceBefore=8,
+        spaceAfter=4,
+    )
+    for marca_grupo, df_marca in df_pdf.groupby(
+        df_pdf["Marca"].astype(str), sort=True
+    ):
+        elementos.append(Paragraph(marca_grupo or "Sin marca", estilo_marca))
+        datos = [
+            [
+                Paragraph("Nombre", estilo_encabezado_tabla),
+                Paragraph("SKU", estilo_encabezado_tabla),
+                Paragraph(columna_precio, estilo_encabezado_tabla),
+            ]
         ]
-    ]
-    for _, fila in df_pdf.iterrows():
-        datos.append(
-            [
-                Paragraph(str(fila.get("Nombre", "")), estilo_celda),
-                Paragraph(str(fila.get("Marca", "")), estilo_celda),
-                Paragraph(str(fila.get("SKU", "")), estilo_celda),
-                Paragraph(
-                    formatear_moneda_pdf(fila.get(columna_precio)), estilo_celda_derecha
-                ),
-            ]
+        for _, fila in df_marca.iterrows():
+            datos.append(
+                [
+                    Paragraph(str(fila.get("Nombre", "")), estilo_celda),
+                    Paragraph(str(fila.get("SKU", "")), estilo_celda),
+                    Paragraph(
+                        formatear_moneda_pdf(fila.get(columna_precio)),
+                        estilo_celda_derecha,
+                    ),
+                ]
+            )
+        tabla = Table(
+            datos, repeatRows=1, colWidths=[11.0 * cm, 3.2 * cm, 3.3 * cm]
         )
-    tabla = Table(
-        datos, repeatRows=1, colWidths=[8.8 * cm, 2.7 * cm, 2.8 * cm, 3.2 * cm]
-    )
-    tabla.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDE7F6")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]
+        tabla.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDE7F6")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
         )
-    )
-    elementos.append(tabla)
+        elementos.append(tabla)
+        elementos.append(Spacer(1, 0.25 * cm))
     elementos.extend([Spacer(1, 0.5 * cm), Paragraph(pie_pdf, estilos["Normal"])])
     documento.build(elementos)
     return buffer.getvalue()
 
 
-def obtener_marcas_listas(df: pd.DataFrame) -> list[str]:
-    """Devuelve marcas no vacías ordenadas para la sección de listas."""
+def obtener_marcas_listas(
+    df: pd.DataFrame, tipo_producto: str | None = "Todos"
+) -> list[str]:
+    """Devuelve marcas no vacías ordenadas respetando el tipo de producto."""
+    df_filtrado = filtrar_lista_por_tipo_producto(df, tipo_producto)
     return sorted(
-        marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
+        marca
+        for marca in df_filtrado["Marca"].dropna().astype(str).unique()
+        if marca.strip()
     )
 
 
@@ -1302,10 +1331,14 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
         )
 
         st.subheader("Generación de PDF")
-        filtro_marca = st.selectbox(
+        marcas_disponibles_pdf = obtener_marcas_listas(
+            df_listas_calculado, tipo_producto_pdf
+        )
+        marcas_pdf = st.multiselect(
             "Marcas a incluir en el PDF",
-            options=["Todas las marcas"] + marcas,
-            key="listas_filtro_marca_pdf",
+            options=marcas_disponibles_pdf,
+            key="listas_filtro_marcas_pdf",
+            help="Dejá vacío para incluir todas las marcas del tipo de producto elegido.",
         )
         pie_pdf = st.text_area(
             "Pie del PDF",
@@ -1313,7 +1346,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
             key="listas_pie_pdf",
             height=100,
         )
-        marca_pdf = None if filtro_marca == "Todas las marcas" else filtro_marca
+        marca_pdf = marcas_pdf
         df_pdf_filtrado = filtrar_lista_para_pdf(
             df_listas_calculado,
             marca_pdf,
@@ -1335,7 +1368,7 @@ def mostrar_listas_precios(df: pd.DataFrame) -> None:
                     ].items()
                 )
             ),
-            filtro_marca,
+            tuple(sorted(marcas_pdf)),
             tipo_producto_pdf,
             pie_pdf,
             int(pd.util.hash_pandas_object(tabla_listas_editada, index=True).sum()),
