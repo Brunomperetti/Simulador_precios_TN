@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import unittest
+from unittest.mock import patch
 from io import StringIO
 
 import pandas as pd
@@ -874,12 +875,12 @@ class ListasPreciosTest(unittest.TestCase):
 
         self.assertEqual(
             df_suplementos_minorista["SKU"].tolist(),
-            ["SKU-GEO", "SKU-VIT", "SKU-TRU", "SKU-LIF"],
+            ["SKU-GEO", "SKU-LIF", "SKU-TRU", "SKU-VIT"],
         )
         self.assertEqual(df_alimentos_mayorista["SKU"].tolist(), ["SKU-ALI"])
         self.assertEqual(
             df_suplementos_con_exclusion["SKU"].tolist(),
-            ["SKU-VIT", "SKU-TRU", "SKU-LIF"],
+            ["SKU-LIF", "SKU-TRU", "SKU-VIT"],
         )
 
 
@@ -954,6 +955,106 @@ class ListasPreciosTest(unittest.TestCase):
         )
 
         self.assertEqual(df_pdf["SKU"].tolist(), ["SKU-GEO"])
+
+
+    def test_pdf_ordena_por_marca_y_nombre(self):
+        from app import (
+            calcular_listas_precios,
+            filtrar_lista_para_pdf,
+            preparar_tabla_listas_precios,
+        )
+
+        df_listas = preparar_tabla_listas_precios(
+            pd.DataFrame(
+                [
+                    ["Zulu", "Marca 2", "SKU-Z", "100"],
+                    ["Beta", "Marca 1", "SKU-B", "100"],
+                    ["Alfa", "Marca 1", "SKU-A", "100"],
+                ],
+                columns=["Nombre", "Marca", "SKU", "Costo"],
+            )
+        )
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+
+        df_pdf = filtrar_lista_para_pdf(df_calculado, ["Marca 2", "Marca 1"])
+
+        self.assertEqual(df_pdf["Marca"].tolist(), ["Marca 1", "Marca 1", "Marca 2"])
+        self.assertEqual(df_pdf["Nombre"].tolist(), ["Alfa", "Beta", "Zulu"])
+
+    def test_productos_sin_costo_respeta_tipo_y_varias_marcas_sin_exclusiones(self):
+        from app import (
+            calcular_listas_precios,
+            generar_csv_productos_sin_costo_listas,
+            obtener_productos_sin_costo_listas,
+            preparar_tabla_listas_precios,
+        )
+
+        df_base = pd.DataFrame(
+            [
+                ["Suplemento A", "GEONAT", "SKU-A", ""],
+                ["Suplemento B", "Vitamin Way", "SKU-B", "0"],
+                ["Suplemento C", "NATURE'S TRUTH", "SKU-C", "100"],
+                ["Alimento A", "Marca Alimentos", "SKU-D", ""],
+            ],
+            columns=["Nombre", "Marca", "SKU", "Costo"],
+        )
+        df_listas = preparar_tabla_listas_precios(df_base)
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+
+        reporte = obtener_productos_sin_costo_listas(
+            df_calculado, ["GEONAT", "Vitamin Way", "Marca Alimentos"], "Suplementos"
+        )
+        csv_reporte = generar_csv_productos_sin_costo_listas(reporte).decode(
+            "utf-8-sig"
+        )
+
+        self.assertEqual(reporte["SKU"].tolist(), ["SKU-A", "SKU-B"])
+        self.assertIn("SKU-A", csv_reporte)
+        self.assertIn("SKU-B", csv_reporte)
+        self.assertNotIn("SKU-D", csv_reporte)
+
+    @unittest.skipIf(
+        importlib.util.find_spec("reportlab") is None, "reportlab no está instalado"
+    )
+    def test_pdf_columnas_nombre_marca_precio_sin_sku(self):
+        from reportlab.platypus import Flowable
+        from app import (
+            calcular_listas_precios,
+            generar_pdf_lista_precios,
+            preparar_tabla_listas_precios,
+        )
+
+        tablas = []
+
+        class TablaCapturada(Flowable):
+            def __init__(self, datos, *args, **kwargs):
+                super().__init__()
+                tablas.append(datos)
+
+            def setStyle(self, estilo):
+                return None
+
+            def wrap(self, *args, **kwargs):
+                return (1, 1)
+
+            def draw(self):
+                return None
+
+        df_listas = preparar_tabla_listas_precios(self.crear_dataframe_listas())
+        df_calculado = calcular_listas_precios(df_listas, 2.0, 1.5)
+
+        with patch("reportlab.platypus.Table", TablaCapturada):
+            generar_pdf_lista_precios(
+                df_calculado, "Minorista", "Pie de prueba", logo_path="sin_logo.png"
+            )
+
+        encabezados = [celda.getPlainText() for celda in tablas[0][0]]
+        primera_fila = [celda.getPlainText() for celda in tablas[0][1]]
+        self.assertEqual(
+            encabezados, ["Nombre / Producto", "Marca", "Precio Minorista"]
+        )
+        self.assertNotIn("SKU", encabezados)
+        self.assertEqual(primera_fila[1], "Marca 1")
 
     def test_listas_precios_usa_copia_y_multiplicadores_por_marca(self):
         from app import calcular_listas_precios, preparar_tabla_listas_precios
