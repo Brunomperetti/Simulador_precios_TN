@@ -249,6 +249,24 @@ def recalcular_precios(df_editado: pd.DataFrame) -> pd.DataFrame:
     return df_calculado[COLUMNAS_BASE_VISTA]
 
 
+
+def aplicar_multiplicador_a_marcas(
+    df_trabajo: pd.DataFrame, marcas_seleccionadas: list[str], multiplicador: float
+) -> tuple[pd.DataFrame, list]:
+    """Aplica el multiplicador solo a las filas de las marcas elegidas."""
+    tabla_actual = df_trabajo.copy()
+    if not marcas_seleccionadas:
+        return tabla_actual, []
+
+    mascara_marcas = tabla_actual["Marca"].astype(str).isin(marcas_seleccionadas)
+    indices_afectados = tabla_actual.index[mascara_marcas].tolist()
+    if not indices_afectados:
+        return tabla_actual, []
+
+    tabla_actual.loc[mascara_marcas, "Multiplicador"] = multiplicador
+    return recalcular_precios(tabla_actual), indices_afectados
+
+
 def formatear_opcion_producto(fila: pd.Series) -> str:
     """Muestra cada producto como Nombre | SKU | Marca para el selector."""
     nombre = str(fila.get("Nombre", "")).strip()
@@ -1731,16 +1749,42 @@ def main() -> None:
         st.success("Simulación restaurada. Se mantuvieron los costos editados.")
 
     st.subheader("Multiplicador masivo por marca")
-    st.caption("Aplicá un multiplicador a todos los productos de una marca.")
+    st.caption(
+        "Elegí una, varias o todas las marcas y aplicá un mismo multiplicador "
+        "solo a sus productos."
+    )
     marcas = sorted(
         marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
     )
 
+    # El selector vive fuera del formulario para que el alcance se vea antes de aplicar.
+    # Las claves por archivo evitan reutilizar selecciones al cargar otro CSV.
+    seleccionar_todas = st.checkbox(
+        "Todas las marcas",
+        key=f"multiplicador_todas_marcas_{archivo_id}",
+        disabled=not marcas,
+    )
+    marcas_seleccionadas = st.multiselect(
+        "Marcas a modificar",
+        options=marcas,
+        key=f"multiplicador_marcas_seleccionadas_{archivo_id}",
+        disabled=seleccionar_todas or not marcas,
+        help="Elegí una o varias marcas. Para aplicar a todas, marcá 'Todas las marcas'.",
+    )
+    marcas_objetivo = marcas if seleccionar_todas else marcas_seleccionadas
+    productos_objetivo = int(
+        st.session_state["tabla_trabajo"]["Marca"].astype(str).isin(marcas_objetivo).sum()
+    )
+    st.caption(
+        f"Alcance: {len(marcas_objetivo)} marca(s) y {productos_objetivo} producto(s)."
+    )
+    if not marcas:
+        st.info("No se encontraron marcas en el CSV.")
+    elif not marcas_objetivo:
+        st.info("Seleccioná al menos una marca para habilitar la aplicación.")
+
     with st.form("multiplicador_masivo"):
-        col_marca, col_multiplicador = st.columns([2, 1])
-        marca_seleccionada = col_marca.selectbox(
-            "Marca", options=marcas, disabled=not marcas
-        )
+        col_multiplicador, col_boton_masivo = st.columns([1, 2])
         multiplicador_masivo = col_multiplicador.number_input(
             "Multiplicador",
             min_value=0.0,
@@ -1748,14 +1792,15 @@ def main() -> None:
             step=0.1,
             format="%.4f",
         )
-        aplicar_masivo = st.form_submit_button("Aplicar a la marca")
+        aplicar_masivo = col_boton_masivo.form_submit_button(
+            "Aplicar a las marcas seleccionadas",
+            disabled=not marcas_objetivo,
+        )
 
-    if aplicar_masivo and marcas:
-        tabla_actual = st.session_state["tabla_trabajo"].copy()
-        mascara_marca = tabla_actual["Marca"].astype(str) == str(marca_seleccionada)
-        indices_afectados_accion = tabla_actual.index[mascara_marca].tolist()
-        tabla_actual.loc[mascara_marca, "Multiplicador"] = multiplicador_masivo
-        tabla_actual = recalcular_precios(tabla_actual)
+    if aplicar_masivo and marcas_objetivo:
+        tabla_actual, indices_afectados_accion = aplicar_multiplicador_a_marcas(
+            st.session_state["tabla_trabajo"], marcas_objetivo, multiplicador_masivo
+        )
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["indices_afectados"].update(indices_afectados_accion)
         st.session_state["editor_version"] += 1
@@ -1765,7 +1810,7 @@ def main() -> None:
                 f"Multiplicador {multiplicador_masivo}",
                 tabla_actual,
                 indices_afectados_accion,
-                "de la marca",
+                "de las marcas seleccionadas",
             )
         )
 
