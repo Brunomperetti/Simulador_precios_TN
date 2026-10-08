@@ -267,6 +267,41 @@ def aplicar_multiplicador_a_marcas(
     return recalcular_precios(tabla_actual), indices_afectados
 
 
+
+def marcas_seleccionadas_por_tilde(
+    marcas_disponibles: list[str], seleccionar_todas: bool
+) -> list[str]:
+    """Marcar todas selecciona las marcas reales; destildar limpia la selección."""
+    return list(marcas_disponibles) if seleccionar_todas else []
+
+
+def todas_las_marcas_estan_seleccionadas(
+    marcas_disponibles: list[str], marcas_seleccionadas: list[str]
+) -> bool:
+    """Detecta si el checkbox debe estar marcado tras editar la selección."""
+    return bool(marcas_disponibles) and set(marcas_seleccionadas) == set(
+        marcas_disponibles
+    )
+
+
+def actualizar_marcas_desde_tilde_todas(
+    marcas_disponibles: list[str], clave_todas: str, clave_marcas: str
+) -> None:
+    """Callback: transfiere el tilde a la selección editable antes del rerun."""
+    st.session_state[clave_marcas] = marcas_seleccionadas_por_tilde(
+        marcas_disponibles, bool(st.session_state[clave_todas])
+    )
+
+
+def actualizar_tilde_desde_marcas(
+    marcas_disponibles: list[str], clave_todas: str, clave_marcas: str
+) -> None:
+    """Callback: si se quita una marca, deja el checkbox sin marcar."""
+    st.session_state[clave_todas] = todas_las_marcas_estan_seleccionadas(
+        marcas_disponibles, st.session_state[clave_marcas]
+    )
+
+
 def formatear_opcion_producto(fila: pd.Series) -> str:
     """Muestra cada producto como Nombre | SKU | Marca para el selector."""
     nombre = str(fila.get("Nombre", "")).strip()
@@ -1757,21 +1792,31 @@ def main() -> None:
         marca for marca in df["Marca"].dropna().astype(str).unique() if marca.strip()
     )
 
-    # El selector vive fuera del formulario para que el alcance se vea antes de aplicar.
-    # Las claves por archivo evitan reutilizar selecciones al cargar otro CSV.
-    seleccionar_todas = st.checkbox(
+    # Ambos controles reflejan la misma selección real. Las claves por archivo
+    # impiden reutilizar marcas cuando se sube otro CSV.
+    clave_todas = f"multiplicador_todas_marcas_{archivo_id}"
+    clave_marcas = f"multiplicador_marcas_seleccionadas_{archivo_id}"
+    st.checkbox(
         "Todas las marcas",
-        key=f"multiplicador_todas_marcas_{archivo_id}",
+        key=clave_todas,
         disabled=not marcas,
+        on_change=actualizar_marcas_desde_tilde_todas,
+        args=(marcas, clave_todas, clave_marcas),
     )
     marcas_seleccionadas = st.multiselect(
         "Marcas a modificar",
         options=marcas,
-        key=f"multiplicador_marcas_seleccionadas_{archivo_id}",
-        disabled=seleccionar_todas or not marcas,
-        help="Elegí una o varias marcas. Para aplicar a todas, marcá 'Todas las marcas'.",
+        key=clave_marcas,
+        disabled=not marcas,
+        on_change=actualizar_tilde_desde_marcas,
+        args=(marcas, clave_todas, clave_marcas),
+        help="Marcá todas y quitá las marcas que no deban recibir el multiplicador.",
     )
-    marcas_objetivo = marcas if seleccionar_todas else marcas_seleccionadas
+    st.caption(
+        "Podés seleccionar todas las marcas y quitar las excepciones con la X "
+        "de cada etiqueta. Destildar 'Todas las marcas' limpia la selección."
+    )
+    marcas_objetivo = marcas_seleccionadas
     productos_objetivo = int(
         st.session_state["tabla_trabajo"]["Marca"].astype(str).isin(marcas_objetivo).sum()
     )
