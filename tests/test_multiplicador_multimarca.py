@@ -9,6 +9,7 @@ from app import (
     reemplazar_simulacion_por_marcas,
     preparar_vista_cambios,
     construir_dataframe_exportacion,
+    generar_csv_descarga_precios,
     preparar_tabla_trabajo,
     recalcular_precios,
     marcas_seleccionadas_por_tilde,
@@ -75,12 +76,22 @@ class TestMultiplicadorMultimarca(unittest.TestCase):
         self.assertEqual(segunda.loc[2, "Costo"], 125.0)
         self.assertEqual(segunda.loc[2, "Multiplicador"], 1.0)
         self.assertEqual(self.tabla.loc[2, "Costo"], 100.0)
+        bloqueados = set(segunda.index) - set(indices)
         exportado = construir_dataframe_exportacion(
-            self.original, segunda, self.costos_originales, set(indices)
+            self.original, segunda, self.costos_originales, set(indices), bloqueados
         )
-        # Preservar el costo editado es independiente de excluir el precio.
+        # Conservar el costo editado es independiente de excluir el precio.
         self.assertEqual(exportado.loc[2, "Precio"], self.original.loc[2, "Precio"])
         self.assertEqual(exportado.loc[2, "Costo"], "125.00")
+        csv_original = self.original.to_csv(index=False).encode("utf-8")
+        csv_salida = generar_csv_descarga_precios(
+            csv_original, self.original, segunda, self.costos_originales,
+            ",", "utf-8", set(indices), bloqueados
+        )
+        from io import BytesIO
+        filas = pd.read_csv(BytesIO(csv_salida), dtype=str, keep_default_na=False)
+        self.assertEqual(filas.loc[2, "Precio"], self.original.loc[2, "Precio"])
+        self.assertEqual(filas.loc[2, "Costo"], "125.00")
 
     def test_reemplazar_no_se_ejecuta_sin_marcas(self):
         primera, _ = aplicar_multiplicador_a_marcas(
