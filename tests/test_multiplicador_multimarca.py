@@ -9,6 +9,8 @@ from app import (
     construir_dataframe_exportacion,
     preparar_tabla_trabajo,
     recalcular_precios,
+    marcas_seleccionadas_por_tilde,
+    todas_las_marcas_estan_seleccionadas,
 )
 
 
@@ -26,6 +28,59 @@ class TestMultiplicadorMultimarca(unittest.TestCase):
         )
         self.tabla = preparar_tabla_trabajo(self.original)
         self.costos_originales = self.tabla["Costo"].copy()
+
+    def test_tildar_todas_marca_todas_las_opciones(self):
+        marcas = ["Pampa", "Natufarma", "Ocean"]
+        seleccion = marcas_seleccionadas_por_tilde(marcas, True)
+        self.assertEqual(seleccion, marcas)
+        self.assertTrue(todas_las_marcas_estan_seleccionadas(marcas, seleccion))
+
+    def test_quitar_excepciones_no_elimina_las_56_restantes(self):
+        marcas = [f"Marca {n:02d}" for n in range(62)]
+        seleccion = marcas_seleccionadas_por_tilde(marcas, True)
+        seleccion.remove("Marca 02")
+        seleccion.remove("Marca 47")
+        self.assertEqual(len(seleccion), 60)
+        self.assertFalse(todas_las_marcas_estan_seleccionadas(marcas, seleccion))
+        self.assertIn("Marca 01", seleccion)
+        self.assertNotIn("Marca 02", seleccion)
+
+    def test_destildar_todas_limpia_la_seleccion(self):
+        marcas = ["Pampa", "Natufarma"]
+        self.assertEqual(marcas_seleccionadas_por_tilde(marcas, False), [])
+        self.assertFalse(todas_las_marcas_estan_seleccionadas(marcas, []))
+
+    def test_seleccion_parcial_no_marca_todas(self):
+        marcas = ["Pampa", "Natufarma", "Ocean"]
+        self.assertFalse(
+            todas_las_marcas_estan_seleccionadas(marcas, ["Pampa", "Ocean"])
+        )
+        self.assertTrue(
+            todas_las_marcas_estan_seleccionadas(
+                marcas, ["Ocean", "Pampa", "Natufarma"]
+            )
+        )
+
+    def test_cero_marcas_no_equivale_a_todas(self):
+        self.assertFalse(todas_las_marcas_estan_seleccionadas([], []))
+        self.assertEqual(marcas_seleccionadas_por_tilde([], True), [])
+
+    def test_masivo_23_excluye_marcas_removidas_del_selector(self):
+        marcas = sorted(self.original["Marca"].unique())
+        elegidas = marcas_seleccionadas_por_tilde(marcas, True)
+        elegidas.remove("Natufarma")
+        resultado, indices = aplicar_multiplicador_a_marcas(
+            self.tabla, elegidas, 2.3
+        )
+        self.assertEqual(indices, [0, 2, 3, 4])
+        self.assertEqual(resultado.loc[1, "Multiplicador"], 1.0)
+        self.assertEqual(resultado.loc[0, "Multiplicador"], 2.3)
+        exportado = construir_dataframe_exportacion(
+            self.original, resultado, self.costos_originales, set(indices)
+        )
+        self.assertEqual(
+            exportado.loc[1].tolist(), self.original.loc[1].tolist()
+        )
 
     def test_una_marca_incluye_todas_sus_variantes(self):
         resultado, indices = aplicar_multiplicador_a_marcas(self.tabla, ["Pampa"], 2.0)
