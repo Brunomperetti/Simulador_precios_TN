@@ -574,14 +574,21 @@ def calcular_mascara_precios_exportados(
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
+    indices_excluidos_precio: set | None = None,
 ) -> pd.Series:
-    """Marca precios que fueron afectados, son válidos y cambian realmente."""
+    """Marca precios a exportar sin alterar las marcas excluidas en el reemplazo."""
     if indices_afectados is None:
         indices_afectados = set()
 
-    return calcular_mascara_modificados(
+    mascara = calcular_mascara_modificados(
         df_calculado, costos_originales, indices_afectados
     ) & calcular_mascara_precios_actualizados(df_calculado)
+    if indices_excluidos_precio:
+        mascara = mascara & ~pd.Series(
+            df_calculado.index.isin(indices_excluidos_precio),
+            index=df_calculado.index,
+        )
+    return mascara
 
 
 def construir_dataframe_exportacion_precios(
@@ -589,10 +596,12 @@ def construir_dataframe_exportacion_precios(
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
+    indices_excluidos_precio: set | None = None,
 ) -> pd.DataFrame:
     """Conserva el dataframe original y modifica Precio y Costo afectados."""
     return construir_dataframe_exportacion(
-        df_original, df_calculado, costos_originales, indices_afectados
+        df_original, df_calculado, costos_originales,
+        indices_afectados, indices_excluidos_precio
     )
 
 
@@ -601,6 +610,7 @@ def construir_dataframe_exportacion(
     df_calculado: pd.DataFrame,
     costos_originales: pd.Series,
     indices_afectados: set | None = None,
+    indices_excluidos_precio: set | None = None,
 ) -> pd.DataFrame:
     """Conserva columnas originales y actualiza Precio y Costo modificados."""
     df_final = df_original.copy()
@@ -608,7 +618,7 @@ def construir_dataframe_exportacion(
         indices_afectados = set()
 
     mascara_actualizar_precio = calcular_mascara_precios_exportados(
-        df_calculado, costos_originales, indices_afectados
+        df_calculado, costos_originales, indices_afectados, indices_excluidos_precio
     )
     mascara_actualizar_costo = series_diferentes(
         df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
@@ -700,6 +710,7 @@ def generar_csv_descarga_preservando_original(
     separador: str,
     encoding: str | None = None,
     indices_afectados: set | None = None,
+    indices_excluidos_precio: set | None = None,
 ) -> bytes:
     """
     Exporta usando el CSV subido como base y cambia Precio y Costo en filas modificadas.
@@ -720,7 +731,7 @@ def generar_csv_descarga_preservando_original(
         indices_afectados = set()
 
     mascara_actualizar_precio = calcular_mascara_precios_exportados(
-        df_calculado, costos_originales, indices_afectados
+        df_calculado, costos_originales, indices_afectados, indices_excluidos_precio
     )
     mascara_actualizar_costo = series_diferentes(
         df_calculado["Costo"], costos_originales.reindex(df_calculado.index)
@@ -819,6 +830,7 @@ def generar_csv_descarga_precios(
     separador_original: str,
     encoding: str | None = None,
     indices_afectados: set | None = None,
+    indices_excluidos_precio: set | None = None,
 ) -> bytes:
     """Exporta el CSV original completo cambiando Precio y Costo afectados."""
     return generar_csv_descarga_preservando_original(
@@ -829,6 +841,7 @@ def generar_csv_descarga_precios(
         separador_original,
         encoding,
         indices_afectados,
+        indices_excluidos_precio,
     )
 
 
@@ -1713,6 +1726,7 @@ def main() -> None:
         st.session_state["tabla_trabajo"] = tabla_inicial
         st.session_state["costos_originales"] = tabla_inicial["Costo"].copy()
         st.session_state["indices_afectados"] = set()
+        st.session_state["indices_excluidos_precio"] = set()
         st.session_state["archivo_id"] = archivo_id
         st.session_state["ultimo_producto_modificado"] = None
         st.session_state["editor_version"] = 0
@@ -1735,6 +1749,7 @@ def main() -> None:
         )
 
     if aplicar_global:
+        st.session_state["indices_excluidos_precio"] = set()
         tabla_actual = st.session_state["tabla_trabajo"].copy()
         indices_afectados_accion = tabla_actual.index.tolist()
         tabla_actual.loc[indices_afectados_accion, "Multiplicador"] = (
@@ -1770,6 +1785,7 @@ def main() -> None:
         )
 
     if aplicar_margen_objetivo:
+        st.session_state["indices_excluidos_precio"] = set()
         tabla_actual = st.session_state["tabla_trabajo"].copy()
         indices_afectados_accion = tabla_actual.index.tolist()
         multiplicador_margen = 1 + margen_objetivo / 100
@@ -1799,6 +1815,7 @@ def main() -> None:
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["costos_originales"] = tabla_actual["Costo"].copy()
         st.session_state["indices_afectados"] = set()
+        st.session_state["indices_excluidos_precio"] = set()
         st.session_state["ultimo_producto_modificado"] = None
         st.session_state["editor_version"] += 1
         st.success("Simulación restaurada. Se mantuvieron los costos editados.")
@@ -1852,7 +1869,8 @@ def main() -> None:
         "Aplicar conserva los cambios anteriores. Reemplazar simulación reinicia "
         "todos los multiplicadores previos, incluso los aplicados por producto o "
         "globalmente, y aplica el valor solo a la selección actual. "
-        "Los costos editados se conservan."
+        "Los costos editados se conservan y se exportan aunque se excluya la "
+        "marca; los precios de las marcas excluidas permanecen originales."
     )
     with st.form("multiplicador_masivo"):
         col_multiplicador, col_aplicar, col_reemplazar = st.columns([1, 2, 2])
@@ -1881,12 +1899,18 @@ def main() -> None:
             )
             # En modo reemplazo las acciones anteriores dejan de estar activas.
             st.session_state["indices_afectados"] = set(indices_afectados_accion)
+            st.session_state["indices_excluidos_precio"] = (
+                set(tabla_actual.index) - set(indices_afectados_accion)
+            )
             st.session_state["ultimo_producto_modificado"] = None
         else:
             tabla_actual, indices_afectados_accion = aplicar_multiplicador_a_marcas(
                 st.session_state["tabla_trabajo"], marcas_objetivo, multiplicador_masivo
             )
             st.session_state["indices_afectados"].update(indices_afectados_accion)
+            st.session_state["indices_excluidos_precio"].difference_update(
+                indices_afectados_accion
+            )
 
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["editor_version"] += 1
@@ -1952,6 +1976,7 @@ def main() -> None:
         tabla_actual = recalcular_precios(tabla_actual)
         st.session_state["tabla_trabajo"] = tabla_actual
         st.session_state["indices_afectados"].add(producto_seleccionado)
+        st.session_state["indices_excluidos_precio"].discard(producto_seleccionado)
         st.session_state["editor_version"] += 1
         actualizar_ultimo_producto(tabla_actual, [producto_seleccionado])
         producto_aplicado = formatear_opcion_producto(
@@ -1997,11 +2022,15 @@ def main() -> None:
 
     # Recalculamos siempre con los últimos valores editados para que el resultado y el CSV coincidan.
     df_calculado = recalcular_precios(df_editado)
+    multiplicadores_editados = series_diferentes(
+        df_calculado["Multiplicador"], tabla_previa_editor["Multiplicador"]
+    )
+    st.session_state["indices_excluidos_precio"].difference_update(
+        df_calculado.index[multiplicadores_editados].tolist()
+    )
     filas_editadas = df_calculado.index[
         series_diferentes(df_calculado["Costo"], tabla_previa_editor["Costo"])
-        | series_diferentes(
-            df_calculado["Multiplicador"], tabla_previa_editor["Multiplicador"]
-        )
+        | multiplicadores_editados
     ].tolist()
     actualizar_ultimo_producto(df_calculado, filas_editadas)
     st.session_state["tabla_trabajo"] = df_calculado
@@ -2055,9 +2084,11 @@ def main() -> None:
     )
     mostrar_advertencias_exportacion(df_calculado, mascara_modificados)
 
+    indices_excluidos_precio = st.session_state["indices_excluidos_precio"]
     precios_realmente_modificados = int(
         calcular_mascara_precios_exportados(
-            df_calculado, costos_originales, indices_afectados
+            df_calculado, costos_originales, indices_afectados,
+            indices_excluidos_precio,
         ).sum()
     )
     metricas_exportacion = st.columns(2)
@@ -2074,6 +2105,7 @@ def main() -> None:
         separador,
         codificacion,
         indices_afectados,
+        indices_excluidos_precio,
     )
     columnas_descarga = st.columns(2)
     with columnas_descarga[0]:
