@@ -268,6 +268,26 @@ def aplicar_multiplicador_a_marcas(
 
 
 
+
+def reemplazar_simulacion_por_marcas(
+    df_trabajo: pd.DataFrame, marcas_seleccionadas: list[str], multiplicador: float
+) -> tuple[pd.DataFrame, list]:
+    """Reinicia multiplicadores previos y aplica solo a marcas seleccionadas.
+
+    Conserva intactos los costos editados, precios originales y demás campos.
+    Si no hay marcas, no realiza ningún cambio.
+    """
+    tabla_actual = df_trabajo.copy()
+    if not marcas_seleccionadas:
+        return tabla_actual, []
+
+    tabla_actual["Multiplicador"] = 1.0
+    return aplicar_multiplicador_a_marcas(
+        tabla_actual, marcas_seleccionadas, multiplicador
+    )
+
+
+
 def marcas_seleccionadas_por_tilde(
     marcas_disponibles: list[str], seleccionar_todas: bool
 ) -> list[str]:
@@ -1828,8 +1848,14 @@ def main() -> None:
     elif not marcas_objetivo:
         st.info("Seleccioná al menos una marca para habilitar la aplicación.")
 
+    st.caption(
+        "Aplicar conserva los cambios anteriores. Reemplazar simulación reinicia "
+        "todos los multiplicadores previos, incluso los aplicados por producto o "
+        "globalmente, y aplica el valor solo a la selección actual. "
+        "Los costos editados se conservan."
+    )
     with st.form("multiplicador_masivo"):
-        col_multiplicador, col_boton_masivo = st.columns([1, 2])
+        col_multiplicador, col_aplicar, col_reemplazar = st.columns([1, 2, 2])
         multiplicador_masivo = col_multiplicador.number_input(
             "Multiplicador",
             min_value=0.0,
@@ -1837,21 +1863,42 @@ def main() -> None:
             step=0.1,
             format="%.4f",
         )
-        aplicar_masivo = col_boton_masivo.form_submit_button(
+        aplicar_masivo = col_aplicar.form_submit_button(
             "Aplicar a las marcas seleccionadas",
             disabled=not marcas_objetivo,
+            use_container_width=True,
+        )
+        reemplazar_masivo = col_reemplazar.form_submit_button(
+            "Reemplazar simulación anterior",
+            disabled=not marcas_objetivo,
+            use_container_width=True,
         )
 
-    if aplicar_masivo and marcas_objetivo:
-        tabla_actual, indices_afectados_accion = aplicar_multiplicador_a_marcas(
-            st.session_state["tabla_trabajo"], marcas_objetivo, multiplicador_masivo
-        )
+    if (aplicar_masivo or reemplazar_masivo) and marcas_objetivo:
+        if reemplazar_masivo:
+            tabla_actual, indices_afectados_accion = reemplazar_simulacion_por_marcas(
+                st.session_state["tabla_trabajo"], marcas_objetivo, multiplicador_masivo
+            )
+            # En modo reemplazo las acciones anteriores dejan de estar activas.
+            st.session_state["indices_afectados"] = set(indices_afectados_accion)
+            st.session_state["ultimo_producto_modificado"] = None
+        else:
+            tabla_actual, indices_afectados_accion = aplicar_multiplicador_a_marcas(
+                st.session_state["tabla_trabajo"], marcas_objetivo, multiplicador_masivo
+            )
+            st.session_state["indices_afectados"].update(indices_afectados_accion)
+
         st.session_state["tabla_trabajo"] = tabla_actual
-        st.session_state["indices_afectados"].update(indices_afectados_accion)
         st.session_state["editor_version"] += 1
         actualizar_ultimo_producto(tabla_actual, indices_afectados_accion)
+        prefijo = (
+            "Simulación anterior reemplazada. "
+            if reemplazar_masivo
+            else ""
+        )
         st.success(
-            construir_mensaje_aplicacion(
+            prefijo
+            + construir_mensaje_aplicacion(
                 f"Multiplicador {multiplicador_masivo}",
                 tabla_actual,
                 indices_afectados_accion,
