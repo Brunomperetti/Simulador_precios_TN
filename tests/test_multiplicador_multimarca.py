@@ -6,7 +6,10 @@ import pandas as pd
 
 from app import (
     aplicar_multiplicador_a_marcas,
+    reemplazar_simulacion_por_marcas,
+    preparar_vista_cambios,
     construir_dataframe_exportacion,
+    generar_csv_descarga_precios,
     preparar_tabla_trabajo,
     recalcular_precios,
     marcas_seleccionadas_por_tilde,
@@ -28,6 +31,86 @@ class TestMultiplicadorMultimarca(unittest.TestCase):
         )
         self.tabla = preparar_tabla_trabajo(self.original)
         self.costos_originales = self.tabla["Costo"].copy()
+
+    def test_reemplazar_segunda_simulacion_excluye_marca_previamente_modificada(self):
+        """Reproduce: primero todas a 2.5, después sin Ocean a 3.0."""
+        marcas = sorted(self.tabla["Marca"].unique().tolist())
+        primera, _ = aplicar_multiplicador_a_marcas(self.tabla, marcas, 2.5)
+        segunda, indices = reemplazar_simulacion_por_marcas(
+            primera, ["Pampa", "Natufarma"], 3.0
+        )
+        self.assertEqual(set(indices), {0, 1, 3})
+        self.assertEqual(segunda.loc[0, "Multiplicador"], 3.0)
+        self.assertEqual(segunda.loc[1, "Multiplicador"], 3.0)
+        self.assertTrue((segunda.loc[[2, 4], "Multiplicador"] == 1.0).all())
+        cambios = preparar_vista_cambios(
+            segunda, self.costos_originales, set(indices)
+        )
+        self.assertNotIn("Ocean", cambios["Marca"].tolist())
+        exportado = construir_dataframe_exportacion(
+            self.original, segunda, self.costos_originales, set(indices)
+        )
+        self.assertEqual(exportado.loc[2].tolist(), self.original.loc[2].tolist())
+        self.assertEqual(exportado.loc[4].tolist(), self.original.loc[4].tolist())
+
+    def test_reemplazar_solo_afecta_nueva_seleccion(self):
+        primera, _ = aplicar_multiplicador_a_marcas(
+            self.tabla, ["Pampa", "Natufarma"], 2.5
+        )
+        segunda, indices = reemplazar_simulacion_por_marcas(
+            primera, ["Pampa"], 2.3
+        )
+        self.assertEqual(indices, [0, 3])
+        self.assertEqual(segunda.loc[1, "Multiplicador"], 1.0)
+        self.assertEqual(segunda.loc[0, "Multiplicador"], 2.3)
+
+    def test_reemplazar_preserva_costos_editados_incluso_en_excluidas(self):
+        tabla_editada = self.tabla.copy()
+        tabla_editada.loc[2, "Costo"] = 125.0  # Ocean tendrá un costo editado.
+        primera, _ = aplicar_multiplicador_a_marcas(
+            tabla_editada, ["Pampa", "Ocean"], 2.5
+        )
+        segunda, indices = reemplazar_simulacion_por_marcas(
+            primera, ["Pampa"], 3.0
+        )
+        self.assertEqual(segunda.loc[2, "Costo"], 125.0)
+        self.assertEqual(segunda.loc[2, "Multiplicador"], 1.0)
+        self.assertEqual(self.tabla.loc[2, "Costo"], 100.0)
+        bloqueados = set(segunda.index) - set(indices)
+        exportado = construir_dataframe_exportacion(
+            self.original, segunda, self.costos_originales, set(indices), bloqueados
+        )
+        # Conservar el costo editado es independiente de excluir el precio.
+        self.assertEqual(exportado.loc[2, "Precio"], self.original.loc[2, "Precio"])
+        self.assertEqual(exportado.loc[2, "Costo"], "125.00")
+        csv_original = self.original.to_csv(index=False).encode("utf-8")
+        csv_salida = generar_csv_descarga_precios(
+            csv_original, self.original, segunda, self.costos_originales,
+            ",", "utf-8", set(indices), bloqueados
+        )
+        from io import BytesIO
+        filas = pd.read_csv(BytesIO(csv_salida), dtype=str, keep_default_na=False)
+        self.assertEqual(filas.loc[2, "Precio"], self.original.loc[2, "Precio"])
+        self.assertEqual(filas.loc[2, "Costo"], "125.00")
+
+    def test_reemplazar_no_se_ejecuta_sin_marcas(self):
+        primera, _ = aplicar_multiplicador_a_marcas(
+            self.tabla, ["Ocean"], 2.5
+        )
+        segunda, indices = reemplazar_simulacion_por_marcas(primera, [], 3.0)
+        self.assertEqual(indices, [])
+        pd.testing.assert_frame_equal(segunda, primera)
+
+    def test_reemplazar_limpia_multiplicadores_de_otras_acciones(self):
+        tabla_global = self.tabla.copy()
+        tabla_global["Multiplicador"] = 2.8
+        tabla_global = recalcular_precios(tabla_global)
+        nueva, indices = reemplazar_simulacion_por_marcas(
+            tabla_global, ["Pampa"], 2.3
+        )
+        self.assertEqual(indices, [0, 3])
+        self.assertTrue((nueva.loc[[1, 2, 4], "Multiplicador"] == 1.0).all())
+        self.assertTrue((nueva.loc[[0, 3], "Multiplicador"] == 2.3).all())
 
     def test_tildar_todas_marca_todas_las_opciones(self):
         marcas = ["Pampa", "Natufarma", "Ocean"]
