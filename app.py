@@ -1731,6 +1731,8 @@ def main() -> None:
         st.session_state["ultimo_producto_modificado"] = None
         st.session_state["editor_version"] = 0
 
+    # Compatible con sesiones abiertas antes de incorporar esta funcionalidad.
+    st.session_state.setdefault("indices_excluidos_precio", set())
     config_columnas = obtener_config_columnas()
 
     st.subheader("Multiplicador global")
